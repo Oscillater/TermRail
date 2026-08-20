@@ -1,8 +1,8 @@
 # Codex Switchboard
 
-Minimal local Web tool skeleton for switching between configured terminal sessions.
+Minimal local Web tool for switching between configured terminal sessions.
 
-This first phase implements the backend foundation only. The `web/` workspace is a Vite/React placeholder.
+The `server/` workspace exposes the configured session API and PTY WebSocket, and the `web/` workspace provides a Vite/React terminal UI for selecting, starting, stopping, and interacting with sessions.
 
 ## Setup
 
@@ -16,7 +16,7 @@ npm install
 npm run dev:server
 ```
 
-Or start both the backend and the placeholder frontend:
+Or start both the backend and the frontend:
 
 ```powershell
 npm run dev
@@ -40,6 +40,7 @@ Optional environment variables:
 - `AUTH_TOKEN`, optional token required by HTTP API and WebSocket when set
 - `CONFIG_PATH`, optional override for `data/config.json`
 - `SWITCHBOARD_SHELL`, optional shell override for PTY commands
+- `VITE_AUTH_TOKEN`, optional frontend token; set it to the same value as `AUTH_TOKEN` when using the Vite dev UI with auth enabled
 
 ## Config
 

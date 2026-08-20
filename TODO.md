@@ -3,11 +3,11 @@
 ## 进度
 
 - [x] Session 1：项目骨架 + 后端基础能力。
-- [ ] Session 2：最小浏览器 terminal UI，接上 session 列表、启动/停止、WebSocket 输入输出。
+- [x] Session 2：最小浏览器 terminal UI，接上 session 列表、启动/停止、WebSocket 输入输出。
 - [ ] Session 3：session 编辑 UI + prompt examples 的增删改、Copy / Insert / Send。
 - [ ] Session 4：未读 badge、浏览器通知、交互打磨和第一版可用性验证。
 
-估计还需要 **3 个 session** 做到第一版可用；如果想把交互、错误状态、移动端和真实 Codex CLI 场景打磨得更稳，按 **4 个 session** 预留更合理。
+估计还需要 **2 个 session** 做到第一版可用；如果想把交互、错误状态、移动端和真实 Codex CLI 场景打磨得更稳，按 **3 个 session** 预留更合理。
 
 ## 目标
 
@@ -111,12 +111,12 @@ type PromptExample = {
 
 ### 5. 前端布局
 
-- [ ] 左侧：session 列表。
-- [ ] 中间：xterm.js terminal。
-- [ ] 右侧：prompt examples。
+- [x] 左侧：session 列表。
+- [x] 中间：xterm.js terminal。
+- [x] 右侧：prompt examples。
 - [ ] 添加 session 按钮。
 - [ ] 编辑 session 按钮。
-- [ ] 启动/停止状态指示。
+- [x] 启动/停止状态指示。
 - [ ] inactive session 的未读 badge。
 
 ### 6. Prompt Examples
@@ -130,7 +130,7 @@ type PromptExample = {
 
 ### 7. 未读输出
 
-- [ ] 前端记录当前选中的 active session。
+- [x] 前端记录当前选中的 active session。
 - [ ] inactive session 收到输出时：
   - [ ] 未读数加一
   - [ ] 在左侧 sidebar 显示 badge
@@ -157,9 +157,9 @@ type PromptExample = {
 ## 第一版可用标准
 
 - [x] 我可以手动添加三个 Codex sessions。
-- [ ] 我可以从浏览器启动每个 session。
-- [ ] 我可以在 live terminals 之间切换。
-- [ ] 我可以向当前 Codex session 输入内容。
+- [x] 我可以从浏览器启动每个 session。
+- [x] 我可以在 live terminals 之间切换。
+- [x] 我可以向当前 Codex session 输入内容。
 - [ ] 我可以手动添加 prompt examples。
 - [ ] 我可以把保存的 prompt 发送给当前 session。
 - [ ] 其他 session 有输出时，我能看到未读 badge。

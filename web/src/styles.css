@@ -1,6 +1,6 @@
 :root {
-  color: #1b1f24;
-  background: #f8f9fb;
+  color: #1f252b;
+  background: #f4f6f8;
   font-family:
     Inter,
     ui-sans-serif,
@@ -9,16 +9,398 @@
     BlinkMacSystemFont,
     "Segoe UI",
     sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
+  height: 100%;
+  min-width: 320px;
+  overflow: hidden;
 }
 
-.placeholder {
-  min-height: 100vh;
+#root {
+  height: 100%;
+  min-height: 0;
+}
+
+html {
+  height: 100%;
+  overflow: hidden;
+}
+
+button {
+  border: 0;
+  font: inherit;
+}
+
+.app-shell {
+  height: 100vh;
+  min-height: 0;
   display: grid;
-  place-items: center;
-  font-size: 18px;
-  font-weight: 600;
+  grid-template-columns: minmax(260px, 320px) minmax(360px, 1fr) minmax(
+      280px,
+      340px
+    );
+  background:
+    linear-gradient(90deg, #f9fafb 0, #f9fafb 320px, transparent 320px),
+    #eef1f4;
+  overflow: hidden;
+}
+
+.session-panel,
+.prompt-panel,
+.terminal-panel {
+  min-width: 0;
+  min-height: 0;
+}
+
+.session-panel,
+.prompt-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: 100vh;
+  padding: 18px;
+  overflow: hidden;
+  background: #f9fafb;
+  border-right: 1px solid #d9dee5;
+}
+
+.prompt-panel {
+  border-right: 0;
+  border-left: 1px solid #d9dee5;
+}
+
+.panel-header,
+.terminal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: #69727d;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+h3,
+p {
+  overflow-wrap: anywhere;
+}
+
+h1,
+h2 {
+  margin: 0;
+  color: #15191e;
+  font-size: 19px;
+  line-height: 1.2;
+}
+
+h3 {
+  margin: 0;
+  color: #20262d;
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.ghost-button,
+.session-actions button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid #cbd2da;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #26313b;
+  cursor: pointer;
+}
+
+.ghost-button:hover,
+.session-actions button:not(:disabled):hover {
+  background: #eef4f3;
+  border-color: #9bb7b1;
+}
+
+.session-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.ghost-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.session-list,
+.prompt-list {
+  min-height: 0;
+  overflow: auto;
+}
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.session-item {
+  overflow: hidden;
+  border: 1px solid #dce1e7;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.session-item.selected {
+  border-color: #3f8174;
+  box-shadow: inset 3px 0 0 #3f8174;
+}
+
+.session-select {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-select:hover {
+  background: #f3f7f6;
+}
+
+.session-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.session-name {
+  min-width: 0;
+  color: #15191e;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.session-meta,
+.session-command {
+  display: block;
+  margin-top: 7px;
+  color: #606b76;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.session-command {
+  color: #424b55;
+  font-family:
+    ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.status-pill {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.status-pill.run {
+  background: #dcefe8;
+  color: #176148;
+}
+
+.status-pill.stop {
+  background: #eceff3;
+  color: #5d6670;
+}
+
+.session-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.terminal-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+  padding: 18px;
+}
+
+.terminal-header {
+  flex: 0 0 auto;
+}
+
+.terminal-stats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px 12px;
+  color: #5d6874;
+  font-size: 12px;
+}
+
+.status-dot {
+  width: 9px;
+  height: 9px;
+  align-self: center;
+  border-radius: 50%;
+  background: #87909b;
+}
+
+.status-dot.run {
+  background: #27966f;
+}
+
+.status-dot.stop {
+  background: #87909b;
+}
+
+.error-banner {
+  flex: 0 0 auto;
+  border: 1px solid #efb0a8;
+  border-radius: 6px;
+  padding: 9px 11px;
+  background: #fff0ee;
+  color: #8d2f25;
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.terminal-frame {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid #252a30;
+  border-radius: 8px;
+  background: #111315;
+  cursor: text;
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.terminal-frame:hover {
+  border-color: #3f8174;
+  box-shadow: 0 0 0 3px rgba(63, 129, 116, 0.14);
+}
+
+.terminal-host {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding: 10px;
+}
+
+.terminal-host .xterm {
+  width: 100%;
+  height: 100%;
+}
+
+.terminal-host .xterm-viewport {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.terminal-footer {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  color: #69727d;
+  font-size: 12px;
+}
+
+.prompt-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.prompt-item {
+  border: 1px solid #dce1e7;
+  border-radius: 8px;
+  padding: 12px;
+  background: #ffffff;
+}
+
+.prompt-item pre {
+  margin: 10px 0 0;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #303840;
+  font-family:
+    ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.empty-state {
+  margin: 0;
+  border: 1px dashed #cbd2da;
+  border-radius: 8px;
+  padding: 14px;
+  color: #69727d;
+  background: #ffffff;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+@media (max-width: 980px) {
+  .app-shell {
+    height: 100vh;
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(180px, 260px) minmax(300px, 1fr) minmax(
+        160px,
+        240px
+      );
+  }
+
+  .session-panel,
+  .prompt-panel,
+  .terminal-panel {
+    height: auto;
+  }
+
+  .session-panel,
+  .prompt-panel {
+    border: 0;
+    border-bottom: 1px solid #d9dee5;
+  }
+
+  .prompt-panel {
+    border-top: 1px solid #d9dee5;
+  }
+
+  .session-list {
+    max-height: 360px;
+  }
+
+  .terminal-header {
+    align-items: flex-start;
+  }
 }
