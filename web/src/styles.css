@@ -1,0 +1,24 @@
+:root {
+  color: #1b1f24;
+  background: #f8f9fb;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+.placeholder {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+  font-weight: 600;
+}

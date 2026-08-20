@@ -1,0 +1,18 @@
+{
+  "sessions": [
+    {
+      "id": "test-powershell-echo",
+      "name": "PowerShell Echo Test",
+      "cwd": ".",
+      "command": "Write-Output \"hello from Codex Switchboard\"",
+      "prompts": []
+    },
+    {
+      "id": "test-node-version",
+      "name": "Node Version Test",
+      "cwd": ".",
+      "command": "node -v",
+      "prompts": []
+    }
+  ]
+}
