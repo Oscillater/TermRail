@@ -1,10 +1,10 @@
 # TermRail
 
-Local browser UI for launching, watching, and switching between configured terminal sessions.
+Run persistent terminal sessions from a local browser dashboard.
 
-TermRail keeps project terminals in one local dashboard. Define each session with a working directory and command, start it through a PTY, and interact with it from the browser. It works well for long-running Codex, Claude Code, shell, and development server sessions.
+TermRail helps you keep project shells, coding agents, and development servers in one place. Each session has a saved working directory and command, runs through a real PTY, streams output over WebSocket, and stays available while you switch between sessions.
 
-## Highlights
+## Features
 
 - Start, stop, and switch between named terminal sessions.
 - Browser terminal powered by xterm.js and node-pty.
@@ -16,7 +16,14 @@ TermRail keeps project terminals in one local dashboard. Define each session wit
 - Optional token auth for the HTTP API and WebSocket.
 - Windows startup script for one-command local launch.
 
-## Status
+## Use Cases
+
+- Keep several project shells open without juggling terminal windows.
+- Run Codex, Claude Code, or other CLI agents in named project sessions.
+- Watch background output and jump into active sessions when needed.
+- Keep reusable prompts next to the terminal where they are used.
+
+## Current Scope
 
 TermRail is early alpha software for local developer workstations. The current focus is a stable Windows workflow with PowerShell, Node.js, npm, and browser-based terminal switching. macOS and Linux use the same Node/PTY stack.
 
@@ -44,7 +51,7 @@ npm install
 npm start
 ```
 
-Development mode runs two local services:
+The app runs two local services in development mode:
 
 | Service                   | URL                     |
 | ------------------------- | ----------------------- |
@@ -53,7 +60,7 @@ Development mode runs two local services:
 
 Vite proxies `/api` and `/ws` to the backend.
 
-## Create A Session
+## Sessions
 
 Open the UI, choose **Add**, and configure a session with an id, display name, working directory, and command.
 
@@ -106,6 +113,12 @@ An empty config is created automatically:
 
 `data/config.example.json` is safe to commit and is used by the smoke test.
 
+You can copy the example file to start from known-good sample sessions:
+
+```powershell
+Copy-Item data/config.example.json data/config.json
+```
+
 ### Session Fields
 
 | Field     | Description                                                                                 |
@@ -131,7 +144,7 @@ When using `start.ps1`, setting `AUTH_TOKEN` is enough; the script mirrors it in
 
 ## Security Model
 
-TermRail binds to `127.0.0.1` by default and is designed for local use.
+TermRail binds to `127.0.0.1` by default and is designed for trusted local environments.
 
 - Saved session configs define the command execution boundary.
 - The start endpoint launches the stored `command` for a known session id.
@@ -139,6 +152,13 @@ TermRail binds to `127.0.0.1` by default and is designed for local use.
 - Runtime config stays in `data/config.json`, which is ignored by Git.
 - Remote access belongs behind Tailscale, another private VPN, or a trusted LAN.
 - Set `AUTH_TOKEN` when binding outside localhost.
+
+## Roadmap
+
+- First-run setup flow for creating the initial sessions from the UI.
+- Transcript view with search, copy, clear, and export actions.
+- Screenshots and release notes for a public GitHub launch.
+- Packaging options after the local development workflow is stable.
 
 ## API
 
