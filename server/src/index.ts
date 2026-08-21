@@ -9,7 +9,8 @@ import express, {
 import { authMiddleware } from "./auth.js";
 import { ConfigStore } from "./configStore.js";
 import { HttpError } from "./errors.js";
-import { SessionManager } from "./sessionManager.js";
+import { listDirectoryRoots, listSubdirectories } from "./filesystem.js";
+import { SessionManager, type TerminalSize } from "./sessionManager.js";
 import { attachWebSocketServer } from "./ws.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -44,6 +45,36 @@ function isLocalHost(value: string): boolean {
   return value === "127.0.0.1" || value === "localhost" || value === "::1";
 }
 
+function optionalStartSize(value: unknown): TerminalSize | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  if (record.cols === undefined && record.rows === undefined) {
+    return undefined;
+  }
+
+  if (
+    typeof record.cols !== "number" ||
+    typeof record.rows !== "number" ||
+    !Number.isInteger(record.cols) ||
+    !Number.isInteger(record.rows) ||
+    record.cols < 10 ||
+    record.rows < 3 ||
+    record.cols > 500 ||
+    record.rows > 200
+  ) {
+    throw new HttpError(
+      400,
+      "INVALID_TERMINAL_SIZE",
+      "start size must include integer cols and rows within supported limits",
+    );
+  }
+
+  return { cols: record.cols, rows: record.rows };
+}
+
 async function main(): Promise<void> {
   validatePort(port);
 
@@ -72,6 +103,22 @@ async function main(): Promise<void> {
       ),
     });
   });
+
+  app.get(
+    "/api/filesystem/roots",
+    asyncRoute(async (_request, response) => {
+      response.json({ roots: await listDirectoryRoots(projectRoot) });
+    }),
+  );
+
+  app.get(
+    "/api/filesystem/directories",
+    asyncRoute(async (request, response) => {
+      const path =
+        typeof request.query.path === "string" ? request.query.path : "";
+      response.json(await listSubdirectories(projectRoot, path));
+    }),
+  );
 
   app.post(
     "/api/sessions",
@@ -131,7 +178,10 @@ async function main(): Promise<void> {
           `Session "${request.params.id}" was not found`,
         );
       }
-      const status = await sessionManager.start(session);
+      const status = await sessionManager.start(
+        session,
+        optionalStartSize(request.body),
+      );
       response.json({ status });
     }),
   );

@@ -14,6 +14,8 @@ type RuntimeRecord = {
   state: "running" | "stopped";
   pty: pty.IPty | null;
   buffer: string;
+  cols: number;
+  rows: number;
   startedAt: string | null;
   stoppedAt: string | null;
   lastOutputAt: string | null;
@@ -29,9 +31,60 @@ type SessionManagerEvents = {
 };
 
 const maxBufferChars = 200_000;
+const defaultTerminalSize = { cols: 120, rows: 36 };
+const terminalSizeLimits = {
+  minCols: 10,
+  maxCols: 500,
+  minRows: 3,
+  maxRows: 200,
+};
+
+export type TerminalSize = {
+  cols: number;
+  rows: number;
+};
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function clampValue(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+function normalizeTerminalSize(size?: Partial<TerminalSize>): TerminalSize {
+  return {
+    cols: clampValue(
+      size?.cols ?? defaultTerminalSize.cols,
+      terminalSizeLimits.minCols,
+      terminalSizeLimits.maxCols,
+    ),
+    rows: clampValue(
+      size?.rows ?? defaultTerminalSize.rows,
+      terminalSizeLimits.minRows,
+      terminalSizeLimits.maxRows,
+    ),
+  };
+}
+
+function stoppedRecord(size: TerminalSize): RuntimeRecord {
+  return {
+    state: "stopped",
+    pty: null,
+    buffer: "",
+    cols: size.cols,
+    rows: size.rows,
+    startedAt: null,
+    stoppedAt: null,
+    lastOutputAt: null,
+    exitCode: null,
+    pid: null,
+    exitPromise: null,
+    resolveExit: null,
+  };
 }
 
 function delay(ms: number): Promise<void> {
@@ -100,7 +153,10 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     return this.records.get(sessionId)?.buffer ?? "";
   }
 
-  async start(session: SessionConfig): Promise<RuntimeStatus> {
+  async start(
+    session: SessionConfig,
+    requestedSize?: Partial<TerminalSize>,
+  ): Promise<RuntimeStatus> {
     const existing = this.records.get(session.id);
     if (existing?.state === "running") {
       throw new HttpError(
@@ -113,6 +169,12 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     const cwd = await this.resolveCwd(session.cwd);
     const { file, args } = shellForCommand(session.command);
     const startedAt = now();
+    const terminalSize = normalizeTerminalSize(
+      requestedSize ?? {
+        cols: existing?.cols,
+        rows: existing?.rows,
+      },
+    );
 
     let resolveExit: (() => void) | null = null;
     const exitPromise = new Promise<void>((resolvePromise) => {
@@ -123,8 +185,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     try {
       terminal = pty.spawn(file, args, {
         name: "xterm-256color",
-        cols: 100,
-        rows: 30,
+        cols: terminalSize.cols,
+        rows: terminalSize.rows,
         cwd,
         env: process.env,
       });
@@ -140,6 +202,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       state: "running",
       pty: terminal,
       buffer: "",
+      cols: terminalSize.cols,
+      rows: terminalSize.rows,
       startedAt,
       stoppedAt: null,
       lastOutputAt: null,
@@ -207,12 +271,20 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
   }
 
   resize(sessionId: string, cols: number, rows: number): RuntimeStatus {
-    const record = this.records.get(sessionId);
-    if (!record || record.state !== "running" || !record.pty) {
+    const size = normalizeTerminalSize({ cols, rows });
+    let record = this.records.get(sessionId);
+    if (!record) {
+      record = stoppedRecord(size);
+      this.records.set(sessionId, record);
+    }
+
+    record.cols = size.cols;
+    record.rows = size.rows;
+    if (record.state !== "running" || !record.pty) {
       return this.getStatus(sessionId);
     }
 
-    record.pty.resize(cols, rows);
+    record.pty.resize(size.cols, size.rows);
     return this.getStatus(sessionId);
   }
 

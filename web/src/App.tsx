@@ -1,4 +1,5 @@
 import {
+  type FormEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -41,8 +42,37 @@ type SessionsResponse = {
   statuses: Record<string, RuntimeStatus>;
 };
 
+type SessionResponse = {
+  session: SessionConfig;
+};
+
 type StatusResponse = {
   status: RuntimeStatus;
+};
+
+type TerminalInputRequest = {
+  id: number;
+  data: string;
+};
+
+type TerminalSize = {
+  cols: number;
+  rows: number;
+};
+
+type DirectoryEntry = {
+  name: string;
+  path: string;
+};
+
+type DirectoryRootsResponse = {
+  roots: DirectoryEntry[];
+};
+
+type DirectoryListing = {
+  path: string;
+  parentPath: string | null;
+  entries: DirectoryEntry[];
 };
 
 type WsMessage =
@@ -68,6 +98,25 @@ const terminalSizeLimits = {
   maxRows: 200,
 };
 
+function makeLocalId(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+}
+
+function defaultRuntimeStatus(sessionId: string): RuntimeStatus {
+  return {
+    sessionId,
+    state: "stopped",
+    startedAt: null,
+    stoppedAt: null,
+    lastOutputAt: null,
+    exitCode: null,
+    pid: null,
+    bufferLength: 0,
+  };
+}
+
 function clampValue(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) {
     return min;
@@ -92,6 +141,35 @@ function clampTerminalSize(cols: number, rows: number) {
 
 function apiHeaders(): HeadersInit {
   return authToken ? { Authorization: `Bearer ${authToken}` } : {};
+}
+
+function jsonHeaders(): HeadersInit {
+  return {
+    ...apiHeaders(),
+    "Content-Type": "application/json",
+  };
+}
+
+async function writeClipboardText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textArea = document.createElement("textarea");
+  textArea.value = text;
+  textArea.setAttribute("readonly", "true");
+  textArea.style.position = "fixed";
+  textArea.style.top = "-1000px";
+  textArea.style.left = "-1000px";
+  document.body.append(textArea);
+  textArea.select();
+  const copied = document.execCommand("copy");
+  textArea.remove();
+
+  if (!copied) {
+    throw new Error("Clipboard copy was blocked by the browser");
+  }
 }
 
 function wsUrl(): string {
@@ -155,10 +233,13 @@ function AppShell() {
   const [loading, setLoading] = useState(true);
   const [actionSessionId, setActionSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [terminalInputRequest, setTerminalInputRequest] =
+    useState<TerminalInputRequest | null>(null);
+  const [terminalSize, setTerminalSize] = useState<TerminalSize | null>(null);
+  const terminalInputRequestIdRef = useRef(0);
 
   const selectedSession = useMemo(
-    () =>
-      sessions.find((session) => session.id === selectedSessionId) ?? null,
+    () => sessions.find((session) => session.id === selectedSessionId) ?? null,
     [sessions, selectedSessionId],
   );
   const selectedStatus = selectedSessionId
@@ -169,6 +250,21 @@ function AppShell() {
     setStatuses((current) => ({ ...current, [status.sessionId]: status }));
   }, []);
 
+  const upsertSession = useCallback((session: SessionConfig) => {
+    setSessions((current) => {
+      const existingIndex = current.findIndex((item) => item.id === session.id);
+      if (existingIndex === -1) {
+        return [...current, session];
+      }
+
+      return current.map((item) => (item.id === session.id ? session : item));
+    });
+    setStatuses((current) => ({
+      ...current,
+      [session.id]: current[session.id] ?? defaultRuntimeStatus(session.id),
+    }));
+  }, []);
+
   const loadSessions = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -177,7 +273,10 @@ function AppShell() {
       setSessions(data.sessions);
       setStatuses(data.statuses);
       setSelectedSessionId((current) => {
-        if (current && data.sessions.some((session) => session.id === current)) {
+        if (
+          current &&
+          data.sessions.some((session) => session.id === current)
+        ) {
           return current;
         }
         return data.sessions[0]?.id ?? null;
@@ -202,9 +301,16 @@ function AppShell() {
       setActionSessionId(sessionId);
       setError(null);
       try {
+        const startOptions =
+          action === "start" && terminalSize
+            ? {
+                headers: jsonHeaders(),
+                body: JSON.stringify(terminalSize),
+              }
+            : {};
         const data = await apiRequest<StatusResponse>(
           `/api/sessions/${encodeURIComponent(sessionId)}/${action}`,
-          { method: "POST" },
+          { method: "POST", ...startOptions },
         );
         updateStatus(data.status);
       } catch (requestError) {
@@ -217,14 +323,99 @@ function AppShell() {
         setActionSessionId(null);
       }
     },
-    [updateStatus],
+    [terminalSize, updateStatus],
   );
+
+  const createSession = useCallback(
+    async (session: SessionConfig) => {
+      setError(null);
+      const data = await apiRequest<SessionResponse>("/api/sessions", {
+        method: "POST",
+        headers: jsonHeaders(),
+        body: JSON.stringify(session),
+      });
+      upsertSession(data.session);
+      setSelectedSessionId(data.session.id);
+      return data.session;
+    },
+    [upsertSession],
+  );
+
+  const updateSession = useCallback(
+    async (sessionId: string, session: SessionConfig) => {
+      setError(null);
+      const data = await apiRequest<SessionResponse>(
+        `/api/sessions/${encodeURIComponent(sessionId)}`,
+        {
+          method: "PATCH",
+          headers: jsonHeaders(),
+          body: JSON.stringify(session),
+        },
+      );
+      upsertSession(data.session);
+      setSelectedSessionId(data.session.id);
+      return data.session;
+    },
+    [upsertSession],
+  );
+
+  const deleteSession = useCallback(
+    async (sessionId: string) => {
+      setError(null);
+      await apiRequest<SessionResponse>(
+        `/api/sessions/${encodeURIComponent(sessionId)}`,
+        { method: "DELETE" },
+      );
+
+      const nextSessions = sessions.filter(
+        (session) => session.id !== sessionId,
+      );
+      setSessions(nextSessions);
+      setSelectedSessionId((selected) =>
+        selected === sessionId ? (nextSessions[0]?.id ?? null) : selected,
+      );
+      setStatuses((current) => {
+        const next = { ...current };
+        delete next[sessionId];
+        return next;
+      });
+    },
+    [sessions],
+  );
+
+  const updatePrompts = useCallback(
+    async (sessionId: string, prompts: PromptExample[]) => {
+      setError(null);
+      const data = await apiRequest<SessionResponse>(
+        `/api/sessions/${encodeURIComponent(sessionId)}`,
+        {
+          method: "PATCH",
+          headers: jsonHeaders(),
+          body: JSON.stringify({ prompts }),
+        },
+      );
+      upsertSession(data.session);
+      return data.session;
+    },
+    [upsertSession],
+  );
+
+  const requestTerminalInput = useCallback((data: string) => {
+    terminalInputRequestIdRef.current += 1;
+    setTerminalInputRequest({
+      id: terminalInputRequestIdRef.current,
+      data,
+    });
+  }, []);
 
   return (
     <main className="app-shell">
       <SessionList
         actionSessionId={actionSessionId}
         loading={loading}
+        onCreateSession={createSession}
+        onDeleteSession={deleteSession}
+        onEditSession={updateSession}
         onRefresh={loadSessions}
         onSelect={setSelectedSessionId}
         onStart={(sessionId) => void runAction(sessionId, "start")}
@@ -235,12 +426,19 @@ function AppShell() {
       />
       <TerminalPane
         error={error}
+        inputRequest={terminalInputRequest}
         onError={setError}
+        onSize={setTerminalSize}
         onStatus={updateStatus}
         session={selectedSession}
         status={selectedStatus}
       />
-      <PromptExamples session={selectedSession} />
+      <PromptExamples
+        onTerminalInput={requestTerminalInput}
+        onUpdatePrompts={updatePrompts}
+        session={selectedSession}
+        status={selectedStatus}
+      />
     </main>
   );
 }
@@ -248,6 +446,12 @@ function AppShell() {
 type SessionListProps = {
   actionSessionId: string | null;
   loading: boolean;
+  onCreateSession: (session: SessionConfig) => Promise<SessionConfig>;
+  onDeleteSession: (sessionId: string) => Promise<void>;
+  onEditSession: (
+    sessionId: string,
+    session: SessionConfig,
+  ) => Promise<SessionConfig>;
   onRefresh: () => void;
   onSelect: (sessionId: string) => void;
   onStart: (sessionId: string) => void;
@@ -257,9 +461,228 @@ type SessionListProps = {
   statuses: Record<string, RuntimeStatus>;
 };
 
+type SessionDraft = {
+  id: string;
+  name: string;
+  cwd: string;
+  command: string;
+  promptsJson: string;
+};
+
+type SessionEditorState = {
+  mode: "create" | "edit";
+  originalId: string | null;
+};
+
+function newSessionDraft(): SessionDraft {
+  return {
+    id: makeLocalId("session"),
+    name: "",
+    cwd: ".",
+    command: "",
+    promptsJson: "[]",
+  };
+}
+
+function draftFromSession(session: SessionConfig): SessionDraft {
+  return {
+    id: session.id,
+    name: session.name,
+    cwd: session.cwd,
+    command: session.command,
+    promptsJson: JSON.stringify(session.prompts, null, 2),
+  };
+}
+
+function parsePromptsJson(value: string): PromptExample[] {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error("prompts must be a JSON array");
+  }
+
+  return parsed as PromptExample[];
+}
+
+function messageFromError(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
+type DirectoryPickerProps = {
+  disabled: boolean;
+  onClose: () => void;
+  onSelect: (path: string) => void;
+  value: string;
+};
+
+function DirectoryPicker({
+  disabled,
+  onClose,
+  onSelect,
+  value,
+}: DirectoryPickerProps) {
+  const [roots, setRoots] = useState<DirectoryEntry[]>([]);
+  const [listing, setListing] = useState<DirectoryListing | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadRoots = useCallback(async () => {
+    try {
+      const data = await apiRequest<DirectoryRootsResponse>(
+        "/api/filesystem/roots",
+      );
+      setRoots(data.roots);
+    } catch (requestError) {
+      setError(messageFromError(requestError, "Failed to load folders"));
+    }
+  }, []);
+
+  const loadDirectory = useCallback(async (path: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await apiRequest<DirectoryListing>(
+        `/api/filesystem/directories?path=${encodeURIComponent(path)}`,
+      );
+      setListing(data);
+    } catch (requestError) {
+      setError(messageFromError(requestError, "Failed to load folders"));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadRoots();
+    void loadDirectory(value || ".");
+  }, [loadDirectory, loadRoots, value]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !disabled) {
+        onClose();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [disabled, onClose]);
+
+  return (
+    <div
+      className="directory-picker-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !disabled) {
+          onClose();
+        }
+      }}
+      role="presentation"
+    >
+      <div
+        aria-labelledby="directory-picker-title"
+        aria-modal="true"
+        className="directory-picker"
+        role="dialog"
+      >
+        <div className="directory-picker-header">
+          <div>
+            <span className="field-label">Folder</span>
+            <h2 id="directory-picker-title">Choose CWD</h2>
+            <p>{listing?.path ?? value}</p>
+          </div>
+          <button
+            className="ghost-button compact"
+            disabled={disabled}
+            onClick={onClose}
+            type="button"
+          >
+            Close
+          </button>
+        </div>
+
+        {error ? <div className="form-error">{error}</div> : null}
+
+        <div className="directory-roots">
+          {roots.map((root) => (
+            <button
+              disabled={disabled || loading}
+              key={root.path}
+              onClick={() => void loadDirectory(root.path)}
+              type="button"
+            >
+              {root.name}
+            </button>
+          ))}
+        </div>
+
+        <div className="directory-list">
+          {listing?.parentPath ? (
+            <button
+              disabled={disabled || loading}
+              onClick={() => void loadDirectory(listing.parentPath ?? ".")}
+              type="button"
+            >
+              ..
+            </button>
+          ) : null}
+          {loading ? (
+            <p className="directory-empty">Loading folders...</p>
+          ) : null}
+          {!loading && listing && listing.entries.length === 0 ? (
+            <p className="directory-empty">No subfolders.</p>
+          ) : null}
+          {listing?.entries.map((entry) => (
+            <button
+              disabled={disabled || loading}
+              key={entry.path}
+              onClick={() => void loadDirectory(entry.path)}
+              type="button"
+            >
+              {entry.name}
+            </button>
+          ))}
+        </div>
+
+        <div className="form-actions">
+          <button
+            className="primary-button"
+            disabled={disabled || !listing}
+            onClick={() => {
+              if (listing) {
+                onSelect(listing.path);
+                onClose();
+              }
+            }}
+            type="button"
+          >
+            Use Folder
+          </button>
+          <button
+            className="ghost-button"
+            disabled={disabled}
+            onClick={onClose}
+            type="button"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SessionList({
   actionSessionId,
   loading,
+  onCreateSession,
+  onDeleteSession,
+  onEditSession,
   onRefresh,
   onSelect,
   onStart,
@@ -268,6 +691,102 @@ function SessionList({
   sessions,
   statuses,
 }: SessionListProps) {
+  const [editor, setEditor] = useState<SessionEditorState | null>(null);
+  const [draft, setDraft] = useState<SessionDraft>(() => newSessionDraft());
+  const [formError, setFormError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(
+    null,
+  );
+
+  const openCreateEditor = () => {
+    setEditor({ mode: "create", originalId: null });
+    setDraft(newSessionDraft());
+    setFormError(null);
+    setDirectoryPickerOpen(false);
+  };
+
+  const openEditEditor = (session: SessionConfig) => {
+    onSelect(session.id);
+    setEditor({ mode: "edit", originalId: session.id });
+    setDraft(draftFromSession(session));
+    setFormError(null);
+    setDirectoryPickerOpen(false);
+  };
+
+  const updateDraft = (field: keyof SessionDraft, value: string) => {
+    setDraft((current) => ({ ...current, [field]: value }));
+  };
+
+  const handleSessionSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!editor) {
+      return;
+    }
+
+    setFormError(null);
+
+    let prompts: PromptExample[];
+    try {
+      prompts = parsePromptsJson(draft.promptsJson);
+    } catch (error) {
+      setFormError(messageFromError(error, "Invalid prompts JSON"));
+      return;
+    }
+
+    const session: SessionConfig = {
+      id: draft.id.trim(),
+      name: draft.name.trim(),
+      cwd: draft.cwd.trim(),
+      command: draft.command.trim(),
+      prompts,
+    };
+
+    if (!session.id || !session.name || !session.cwd || !session.command) {
+      setFormError("id, name, cwd, and command are required");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      if (editor.mode === "create") {
+        await onCreateSession(session);
+      } else {
+        await onEditSession(editor.originalId ?? session.id, session);
+      }
+      setEditor(null);
+      setDirectoryPickerOpen(false);
+    } catch (error) {
+      setFormError(messageFromError(error, "Failed to save session"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteSession = async (session: SessionConfig) => {
+    const confirmed = window.confirm(
+      `Delete session "${session.name}"? Running processes will be stopped.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingSessionId(session.id);
+    setFormError(null);
+    try {
+      await onDeleteSession(session.id);
+      if (editor?.originalId === session.id) {
+        setEditor(null);
+        setDirectoryPickerOpen(false);
+      }
+    } catch (error) {
+      setFormError(messageFromError(error, "Failed to delete session"));
+    } finally {
+      setDeletingSessionId(null);
+    }
+  };
+
   return (
     <aside className="session-panel" aria-label="Sessions">
       <div className="panel-header">
@@ -275,10 +794,130 @@ function SessionList({
           <p className="eyebrow">Switchboard</p>
           <h1>Sessions</h1>
         </div>
-        <button className="ghost-button" onClick={onRefresh} type="button">
-          Refresh
-        </button>
+        <div className="panel-header-actions">
+          <button
+            className="ghost-button"
+            disabled={loading}
+            onClick={onRefresh}
+            type="button"
+          >
+            Refresh
+          </button>
+          <button
+            className="primary-button"
+            onClick={openCreateEditor}
+            type="button"
+          >
+            Add
+          </button>
+        </div>
       </div>
+
+      {editor ? (
+        <form className="side-form" onSubmit={handleSessionSubmit}>
+          <div className="form-title-row">
+            <h2>{editor.mode === "create" ? "Add Session" : "Edit Session"}</h2>
+            <button
+              className="ghost-button compact"
+              disabled={saving}
+              onClick={() => {
+                setEditor(null);
+                setDirectoryPickerOpen(false);
+              }}
+              type="button"
+            >
+              Close
+            </button>
+          </div>
+          {formError ? <div className="form-error">{formError}</div> : null}
+          <label>
+            <span>ID</span>
+            <input
+              disabled={saving || editor.mode === "edit"}
+              onChange={(event) => updateDraft("id", event.target.value)}
+              required
+              value={draft.id}
+            />
+          </label>
+          <label>
+            <span>Name</span>
+            <input
+              disabled={saving}
+              onChange={(event) => updateDraft("name", event.target.value)}
+              required
+              value={draft.name}
+            />
+          </label>
+          <div className="form-field">
+            <span className="field-label">CWD</span>
+            <div className="input-row">
+              <input
+                disabled={saving}
+                onChange={(event) => updateDraft("cwd", event.target.value)}
+                required
+                value={draft.cwd}
+              />
+              <button
+                className="ghost-button"
+                disabled={saving}
+                onClick={() => setDirectoryPickerOpen(true)}
+                type="button"
+              >
+                Browse
+              </button>
+            </div>
+          </div>
+          {directoryPickerOpen ? (
+            <DirectoryPicker
+              disabled={saving}
+              onClose={() => setDirectoryPickerOpen(false)}
+              onSelect={(path) => updateDraft("cwd", path)}
+              value={draft.cwd}
+            />
+          ) : null}
+          <label>
+            <span>Command</span>
+            <input
+              disabled={saving}
+              onChange={(event) => updateDraft("command", event.target.value)}
+              required
+              value={draft.command}
+            />
+          </label>
+          <label>
+            <span>Prompts</span>
+            <textarea
+              disabled={saving}
+              onChange={(event) =>
+                updateDraft("promptsJson", event.target.value)
+              }
+              rows={7}
+              spellCheck={false}
+              value={draft.promptsJson}
+            />
+          </label>
+          <div className="form-actions">
+            <button className="primary-button" disabled={saving} type="submit">
+              {saving ? "Saving" : "Save"}
+            </button>
+            <button
+              className="ghost-button"
+              disabled={saving}
+              onClick={() => {
+                setEditor(null);
+                setDirectoryPickerOpen(false);
+              }}
+              type="button"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : null}
+
+      {formError && !editor ? (
+        <div className="form-error">{formError}</div>
+      ) : null}
 
       <div className="session-list">
         {loading ? <p className="empty-state">Loading sessions...</p> : null}
@@ -290,6 +929,7 @@ function SessionList({
           const isSelected = session.id === selectedSessionId;
           const isRunning = status?.state === "running";
           const isBusy = actionSessionId === session.id;
+          const isDeleting = deletingSessionId === session.id;
 
           return (
             <section
@@ -312,18 +952,33 @@ function SessionList({
               </button>
               <div className="session-actions">
                 <button
-                  disabled={isRunning || isBusy}
+                  disabled={isRunning || isBusy || isDeleting}
                   onClick={() => onStart(session.id)}
                   type="button"
                 >
                   Start
                 </button>
                 <button
-                  disabled={!isRunning || isBusy}
+                  disabled={!isRunning || isBusy || isDeleting}
                   onClick={() => onStop(session.id)}
                   type="button"
                 >
                   Stop
+                </button>
+                <button
+                  disabled={isDeleting}
+                  onClick={() => openEditEditor(session)}
+                  type="button"
+                >
+                  Edit
+                </button>
+                <button
+                  className="danger-button"
+                  disabled={isDeleting}
+                  onClick={() => void handleDeleteSession(session)}
+                  type="button"
+                >
+                  {isDeleting ? "Deleting" : "Delete"}
                 </button>
               </div>
             </section>
@@ -336,7 +991,9 @@ function SessionList({
 
 type TerminalPaneProps = {
   error: string | null;
+  inputRequest: TerminalInputRequest | null;
   onError: (message: string | null) => void;
+  onSize: (size: TerminalSize) => void;
   onStatus: (status: RuntimeStatus) => void;
   session: SessionConfig | null;
   status: RuntimeStatus | undefined;
@@ -344,7 +1001,9 @@ type TerminalPaneProps = {
 
 function TerminalPane({
   error,
+  inputRequest,
   onError,
+  onSize,
   onStatus,
   session,
   status,
@@ -363,6 +1022,52 @@ function TerminalPane({
   const [connectionState, setConnectionState] = useState<
     "idle" | "connecting" | "connected" | "closed"
   >("idle");
+
+  const sendTerminalInput = useCallback(
+    (data: string, reportErrors: boolean) => {
+      const sessionId = activeSessionIdRef.current;
+      const socket = wsRef.current;
+
+      if (!data) {
+        return true;
+      }
+
+      if (!sessionId) {
+        if (reportErrors) {
+          onError("Select a session before sending input");
+        }
+        return false;
+      }
+
+      if (statusRef.current?.state !== "running") {
+        if (reportErrors) {
+          onError("Start the selected session before sending input");
+        }
+        return false;
+      }
+
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        if (reportErrors) {
+          onError("WebSocket is not connected");
+        }
+        return false;
+      }
+
+      socket.send(JSON.stringify({ type: "input", sessionId, data }));
+      terminalRef.current?.focus();
+      return true;
+    },
+    [onError],
+  );
+
+  const publishTerminalSize = useCallback(
+    (cols: number, rows: number) => {
+      const size = clampTerminalSize(cols, rows);
+      onSize(size);
+      return size;
+    },
+    [onSize],
+  );
 
   const sendResize = useCallback((cols: number, rows: number) => {
     const sessionId = activeSessionIdRef.current;
@@ -383,6 +1088,15 @@ function TerminalPane({
     socket.send(JSON.stringify({ type: "resize", sessionId, ...size }));
   }, []);
 
+  const handleRedraw = useCallback(() => {
+    const terminal = terminalRef.current;
+    if (terminal) {
+      terminal.refresh(0, Math.max(0, terminal.rows - 1));
+      terminal.focus();
+    }
+    sendTerminalInput("\x0c", true);
+  }, [sendTerminalInput]);
+
   const flushTerminalWrites = useCallback((generation: number) => {
     const terminal = terminalRef.current;
     if (
@@ -402,10 +1116,7 @@ function TerminalPane({
     writeInProgressRef.current = true;
     terminal.write(data, () => {
       writeInProgressRef.current = false;
-      if (
-        generation !== writeGenerationRef.current ||
-        !writeQueueRef.current
-      ) {
+      if (generation !== writeGenerationRef.current || !writeQueueRef.current) {
         return;
       }
 
@@ -501,25 +1212,17 @@ function TerminalPane({
       // Fall back to the default DOM renderer if canvas is unavailable.
     }
     fitAddon.fit();
+    publishTerminalSize(terminal.cols, terminal.rows);
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
 
     const inputDisposable = terminal.onData((data) => {
-      const sessionId = activeSessionIdRef.current;
-      const socket = wsRef.current;
-      if (
-        !sessionId ||
-        !socket ||
-        socket.readyState !== WebSocket.OPEN ||
-        statusRef.current?.state !== "running"
-      ) {
-        return;
-      }
-      socket.send(JSON.stringify({ type: "input", sessionId, data }));
+      sendTerminalInput(data, false);
     });
 
     const resizeDisposable = terminal.onResize(({ cols, rows }) => {
+      publishTerminalSize(cols, rows);
       sendResize(cols, rows);
     });
 
@@ -537,7 +1240,7 @@ function TerminalPane({
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [sendResize]);
+  }, [publishTerminalSize, sendResize, sendTerminalInput]);
 
   useEffect(() => {
     const target = containerRef.current;
@@ -618,6 +1321,7 @@ function TerminalPane({
             queueTerminalWrite(message.buffer);
           }
           onStatus(message.status);
+          publishTerminalSize(terminal.cols, terminal.rows);
           sendResize(terminal.cols, terminal.rows);
           break;
         case "terminal.output":
@@ -653,11 +1357,20 @@ function TerminalPane({
   }, [
     onError,
     onStatus,
+    publishTerminalSize,
     queueTerminalWrite,
     resetTerminalOutput,
     sendResize,
     session?.id,
   ]);
+
+  useEffect(() => {
+    if (!inputRequest) {
+      return;
+    }
+
+    sendTerminalInput(inputRequest.data, true);
+  }, [inputRequest, sendTerminalInput]);
 
   const running = status?.state === "running";
 
@@ -669,6 +1382,14 @@ function TerminalPane({
           <h2>{session?.name ?? "No session selected"}</h2>
         </div>
         <div className="terminal-header-actions">
+          <button
+            className="ghost-button compact"
+            disabled={!running}
+            onClick={handleRedraw}
+            type="button"
+          >
+            Redraw
+          </button>
           <div className="terminal-stats">
             <span className={`status-dot ${running ? "run" : "stop"}`} />
             <span>{statusLabel(status)}</span>
@@ -694,20 +1415,249 @@ function TerminalPane({
 }
 
 type PromptExamplesProps = {
+  onTerminalInput: (data: string) => void;
+  onUpdatePrompts: (
+    sessionId: string,
+    prompts: PromptExample[],
+  ) => Promise<SessionConfig>;
   session: SessionConfig | null;
+  status: RuntimeStatus | undefined;
 };
 
-function PromptExamples({ session }: PromptExamplesProps) {
+type PromptDraft = {
+  id: string;
+  title: string;
+  text: string;
+};
+
+type PromptEditorState = {
+  mode: "create" | "edit";
+  originalId: string | null;
+};
+
+function newPromptDraft(): PromptDraft {
+  return {
+    id: makeLocalId("prompt"),
+    title: "",
+    text: "",
+  };
+}
+
+function draftFromPrompt(prompt: PromptExample): PromptDraft {
+  return {
+    id: prompt.id,
+    title: prompt.title,
+    text: prompt.text,
+  };
+}
+
+function PromptExamples({
+  onTerminalInput,
+  onUpdatePrompts,
+  session,
+  status,
+}: PromptExamplesProps) {
   const prompts = session?.prompts ?? [];
+  const running = status?.state === "running";
+  const [editor, setEditor] = useState<PromptEditorState | null>(null);
+  const [draft, setDraft] = useState<PromptDraft>(() => newPromptDraft());
+  const [formError, setFormError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [copyingPromptId, setCopyingPromptId] = useState<string | null>(null);
+  const [deletingPromptId, setDeletingPromptId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setEditor(null);
+    setDraft(newPromptDraft());
+    setFormError(null);
+    setNotice(null);
+  }, [session?.id]);
+
+  const updateDraft = (field: keyof PromptDraft, value: string) => {
+    setDraft((current) => ({ ...current, [field]: value }));
+  };
+
+  const openCreateEditor = () => {
+    setEditor({ mode: "create", originalId: null });
+    setDraft(newPromptDraft());
+    setFormError(null);
+    setNotice(null);
+  };
+
+  const openEditEditor = (prompt: PromptExample) => {
+    setEditor({ mode: "edit", originalId: prompt.id });
+    setDraft(draftFromPrompt(prompt));
+    setFormError(null);
+    setNotice(null);
+  };
+
+  const handlePromptSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!session || !editor) {
+      return;
+    }
+
+    const prompt: PromptExample = {
+      id: draft.id.trim(),
+      title: draft.title.trim(),
+      text: draft.text,
+    };
+
+    if (!prompt.id || !prompt.title) {
+      setFormError("id and title are required");
+      return;
+    }
+
+    const duplicate = prompts.some(
+      (item) => item.id === prompt.id && item.id !== editor.originalId,
+    );
+    if (duplicate) {
+      setFormError(`Prompt id "${prompt.id}" already exists`);
+      return;
+    }
+
+    const nextPrompts =
+      editor.mode === "create"
+        ? [...prompts, prompt]
+        : prompts.map((item) =>
+            item.id === editor.originalId ? prompt : item,
+          );
+
+    setSaving(true);
+    setFormError(null);
+    setNotice(null);
+    try {
+      await onUpdatePrompts(session.id, nextPrompts);
+      setEditor(null);
+    } catch (error) {
+      setFormError(messageFromError(error, "Failed to save prompt"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeletePrompt = async (prompt: PromptExample) => {
+    if (!session) {
+      return;
+    }
+
+    const confirmed = window.confirm(`Delete prompt "${prompt.title}"?`);
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingPromptId(prompt.id);
+    setFormError(null);
+    setNotice(null);
+    try {
+      await onUpdatePrompts(
+        session.id,
+        prompts.filter((item) => item.id !== prompt.id),
+      );
+      if (editor?.originalId === prompt.id) {
+        setEditor(null);
+      }
+    } catch (error) {
+      setFormError(messageFromError(error, "Failed to delete prompt"));
+    } finally {
+      setDeletingPromptId(null);
+    }
+  };
+
+  const handleCopyPrompt = async (prompt: PromptExample) => {
+    setCopyingPromptId(prompt.id);
+    setFormError(null);
+    setNotice(null);
+    try {
+      await writeClipboardText(prompt.text);
+      setNotice(`Copied "${prompt.title}"`);
+    } catch (error) {
+      setFormError(messageFromError(error, "Failed to copy prompt"));
+    } finally {
+      setCopyingPromptId(null);
+    }
+  };
 
   return (
     <aside className="prompt-panel" aria-label="Prompt examples">
       <div className="panel-header">
         <div>
-          <p className="eyebrow">Read Only</p>
+          <p className="eyebrow">Editable</p>
           <h2>Prompt Examples</h2>
         </div>
+        <button
+          className="primary-button"
+          disabled={!session}
+          onClick={openCreateEditor}
+          type="button"
+        >
+          Add
+        </button>
       </div>
+
+      {editor ? (
+        <form className="side-form" onSubmit={handlePromptSubmit}>
+          <div className="form-title-row">
+            <h2>{editor.mode === "create" ? "Add Prompt" : "Edit Prompt"}</h2>
+            <button
+              className="ghost-button compact"
+              disabled={saving}
+              onClick={() => setEditor(null)}
+              type="button"
+            >
+              Close
+            </button>
+          </div>
+          {formError ? <div className="form-error">{formError}</div> : null}
+          <label>
+            <span>ID</span>
+            <input
+              disabled={saving}
+              onChange={(event) => updateDraft("id", event.target.value)}
+              required
+              value={draft.id}
+            />
+          </label>
+          <label>
+            <span>Title</span>
+            <input
+              disabled={saving}
+              onChange={(event) => updateDraft("title", event.target.value)}
+              required
+              value={draft.title}
+            />
+          </label>
+          <label>
+            <span>Text</span>
+            <textarea
+              disabled={saving}
+              onChange={(event) => updateDraft("text", event.target.value)}
+              rows={8}
+              value={draft.text}
+            />
+          </label>
+          <div className="form-actions">
+            <button className="primary-button" disabled={saving} type="submit">
+              {saving ? "Saving" : "Save"}
+            </button>
+            <button
+              className="ghost-button"
+              disabled={saving}
+              onClick={() => setEditor(null)}
+              type="button"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : null}
+
+      {formError && !editor ? (
+        <div className="form-error">{formError}</div>
+      ) : null}
+      {notice ? <div className="form-notice">{notice}</div> : null}
+
       <div className="prompt-list">
         {!session ? (
           <p className="empty-state">Select a session to view prompts.</p>
@@ -717,8 +1667,47 @@ function PromptExamples({ session }: PromptExamplesProps) {
         ) : null}
         {prompts.map((prompt) => (
           <article className="prompt-item" key={prompt.id}>
-            <h3>{prompt.title}</h3>
+            <div className="prompt-title-row">
+              <div>
+                <h3>{prompt.title}</h3>
+                <span className="prompt-id">{prompt.id}</span>
+              </div>
+            </div>
             <pre>{prompt.text || "(empty prompt)"}</pre>
+            <div className="prompt-actions">
+              <button
+                disabled={copyingPromptId === prompt.id}
+                onClick={() => void handleCopyPrompt(prompt)}
+                type="button"
+              >
+                {copyingPromptId === prompt.id ? "Copying" : "Copy"}
+              </button>
+              <button
+                disabled={!running}
+                onClick={() => onTerminalInput(prompt.text)}
+                type="button"
+              >
+                Insert
+              </button>
+              <button
+                disabled={!running}
+                onClick={() => onTerminalInput(`${prompt.text}\r`)}
+                type="button"
+              >
+                Send
+              </button>
+              <button onClick={() => openEditEditor(prompt)} type="button">
+                Edit
+              </button>
+              <button
+                className="danger-button"
+                disabled={deletingPromptId === prompt.id}
+                onClick={() => void handleDeletePrompt(prompt)}
+                type="button"
+              >
+                {deletingPromptId === prompt.id ? "Deleting" : "Delete"}
+              </button>
+            </div>
           </article>
         ))}
       </div>

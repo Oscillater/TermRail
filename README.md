@@ -67,6 +67,8 @@ If `AUTH_TOKEN` is set, pass either `Authorization: Bearer <token>`, `x-auth-tok
 - `POST /api/sessions/:id/stop`
 - `GET /api/sessions/:id/status`
 - `GET /api/status`
+- `GET /api/filesystem/roots`
+- `GET /api/filesystem/directories?path=<folder>`
 
 Create or update body:
 
@@ -81,6 +83,17 @@ Create or update body:
 ```
 
 There is no arbitrary command execution endpoint. Start only runs the `command` stored in the session config.
+
+The start endpoint may receive the browser terminal size so TUI programs can render at the correct dimensions from the first frame:
+
+```json
+{
+  "cols": 120,
+  "rows": 36
+}
+```
+
+The filesystem endpoints only list local folders for choosing a session `cwd`; they do not read file contents or run commands.
 
 ## WebSocket
 

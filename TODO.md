@@ -4,10 +4,10 @@
 
 - [x] Session 1：项目骨架 + 后端基础能力。
 - [x] Session 2：最小浏览器 terminal UI，接上 session 列表、启动/停止、WebSocket 输入输出。
-- [ ] Session 3：session 编辑 UI + prompt examples 的增删改、Copy / Insert / Send。
+- [x] Session 3：session 编辑 UI + prompt examples 的增删改、Copy / Insert / Send。
 - [ ] Session 4：未读 badge、浏览器通知、交互打磨和第一版可用性验证。
 
-估计还需要 **2 个 session** 做到第一版可用；如果想把交互、错误状态、移动端和真实 Codex CLI 场景打磨得更稳，按 **3 个 session** 预留更合理。
+估计还需要 **1 个 session** 做到第一版可用；如果想把交互、错误状态、移动端和真实 Codex CLI 场景打磨得更稳，按 **2 个 session** 预留更合理。
 
 ## 目标
 
@@ -107,6 +107,8 @@ type PromptExample = {
 - [x] 用 WebSocket 把 PTY 输出流式传给前端。
 - [x] 把前端输入写回 PTY。
 - [x] 浏览器 terminal resize 时，同步 resize PTY。
+- [x] 启动 PTY 时使用浏览器当前 terminal 尺寸，减少 TUI 首屏错乱。
+- [x] 为 Codex resume / TUI 场景提供手动 Redraw 重绘操作。
 - [x] server 运行期间，为每个 active session 保留 terminal buffer。
 
 ### 5. 前端布局
@@ -114,19 +116,20 @@ type PromptExample = {
 - [x] 左侧：session 列表。
 - [x] 中间：xterm.js terminal。
 - [x] 右侧：prompt examples。
-- [ ] 添加 session 按钮。
-- [ ] 编辑 session 按钮。
+- [x] 添加 session 按钮。
+- [x] 编辑 session 按钮。
+- [x] session 表单支持浏览并选择本机文件夹作为 `cwd`。
 - [x] 启动/停止状态指示。
 - [ ] inactive session 的未读 badge。
 
 ### 6. Prompt Examples
 
 - [x] 每个 session 的 prompt list 初始为空。
-- [ ] UI 支持添加、编辑、删除 prompt examples。
-- [ ] 每条 prompt 支持三个操作：
-  - [ ] `Copy`：复制到剪贴板。
-  - [ ] `Insert`：插入到当前 terminal 输入区。
-  - [ ] `Send`：发送文本并追加换行到当前 Codex session。
+- [x] UI 支持添加、编辑、删除 prompt examples。
+- [x] 每条 prompt 支持三个操作：
+  - [x] `Copy`：复制到剪贴板。
+  - [x] `Insert`：插入到当前 terminal 输入区。
+  - [x] `Send`：发送文本并追加换行到当前 Codex session。
 
 ### 7. 未读输出
 
@@ -160,8 +163,8 @@ type PromptExample = {
 - [x] 我可以从浏览器启动每个 session。
 - [x] 我可以在 live terminals 之间切换。
 - [x] 我可以向当前 Codex session 输入内容。
-- [ ] 我可以手动添加 prompt examples。
-- [ ] 我可以把保存的 prompt 发送给当前 session。
+- [x] 我可以手动添加 prompt examples。
+- [x] 我可以把保存的 prompt 发送给当前 session。
 - [ ] 其他 session 有输出时，我能看到未读 badge。
 - [ ] inactive session 有输出时，我能收到浏览器通知。
 
