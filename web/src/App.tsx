@@ -60,6 +60,8 @@ type TerminalSize = {
   rows: number;
 };
 
+type UnreadCounts = Record<string, number>;
+
 type DirectoryEntry = {
   name: string;
   path: string;
@@ -97,6 +99,7 @@ const terminalSizeLimits = {
   minRows: 3,
   maxRows: 200,
 };
+const notificationPreferenceKey = "codex-switchboard.notificationsEnabled";
 
 function makeLocalId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random()
@@ -224,19 +227,78 @@ function statusLabel(status: RuntimeStatus | undefined): string {
   return status?.state === "running" ? "Running" : "Stopped";
 }
 
+function browserNotificationsSupported(): boolean {
+  return typeof window !== "undefined" && "Notification" in window;
+}
+
+function getNotificationPermission(): NotificationPermission {
+  return browserNotificationsSupported() ? Notification.permission : "denied";
+}
+
+function readNotificationEnabledPreference(): boolean {
+  if (
+    !browserNotificationsSupported() ||
+    Notification.permission !== "granted"
+  ) {
+    return false;
+  }
+
+  try {
+    return window.localStorage.getItem(notificationPreferenceKey) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function writeNotificationEnabledPreference(enabled: boolean): void {
+  try {
+    window.localStorage.setItem(notificationPreferenceKey, String(enabled));
+  } catch {
+    // Notification preference persistence is best-effort.
+  }
+}
+
+function notificationStatusLabel(
+  supported: boolean,
+  enabled: boolean,
+  permission: NotificationPermission,
+): string {
+  if (!supported) {
+    return "Unsupported";
+  }
+  if (enabled && permission === "granted") {
+    return "On";
+  }
+  if (permission === "denied") {
+    return "Blocked";
+  }
+  return "Off";
+}
+
 function AppShell() {
   const [sessions, setSessions] = useState<SessionConfig[]>([]);
   const [statuses, setStatuses] = useState<Record<string, RuntimeStatus>>({});
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null,
   );
+  const [unreadCounts, setUnreadCounts] = useState<UnreadCounts>({});
+  const [notificationsEnabled, setNotificationsEnabled] = useState(
+    readNotificationEnabledPreference,
+  );
+  const [notificationPermission, setNotificationPermission] =
+    useState<NotificationPermission>(getNotificationPermission);
   const [loading, setLoading] = useState(true);
   const [actionSessionId, setActionSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [terminalInputRequest, setTerminalInputRequest] =
     useState<TerminalInputRequest | null>(null);
   const [terminalSize, setTerminalSize] = useState<TerminalSize | null>(null);
+  const selectedSessionIdRef = useRef<string | null>(null);
+  const sessionsRef = useRef<SessionConfig[]>([]);
+  const statusesRef = useRef<Record<string, RuntimeStatus>>({});
+  const notificationsEnabledRef = useRef(notificationsEnabled);
   const terminalInputRequestIdRef = useRef(0);
+  const notificationsSupported = browserNotificationsSupported();
 
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedSessionId) ?? null,
@@ -246,9 +308,39 @@ function AppShell() {
     ? statuses[selectedSessionId]
     : undefined;
 
+  const runningSessionIdsKey = useMemo(
+    () =>
+      JSON.stringify(
+        sessions
+          .filter((session) => statuses[session.id]?.state === "running")
+          .map((session) => session.id),
+      ),
+    [sessions, statuses],
+  );
+
   const updateStatus = useCallback((status: RuntimeStatus) => {
     setStatuses((current) => ({ ...current, [status.sessionId]: status }));
   }, []);
+
+  const clearUnread = useCallback((sessionId: string) => {
+    setUnreadCounts((current) => {
+      if (!current[sessionId]) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+  }, []);
+
+  const selectSession = useCallback(
+    (sessionId: string) => {
+      selectedSessionIdRef.current = sessionId;
+      setSelectedSessionId(sessionId);
+      clearUnread(sessionId);
+    },
+    [clearUnread],
+  );
 
   const upsertSession = useCallback((session: SessionConfig) => {
     setSessions((current) => {
@@ -296,6 +388,169 @@ function AppShell() {
     void loadSessions();
   }, [loadSessions]);
 
+  useEffect(() => {
+    selectedSessionIdRef.current = selectedSessionId;
+    if (selectedSessionId) {
+      clearUnread(selectedSessionId);
+    }
+  }, [clearUnread, selectedSessionId]);
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+    const sessionIds = new Set(sessions.map((session) => session.id));
+    setUnreadCounts((current) => {
+      let changed = false;
+      const next: UnreadCounts = {};
+      Object.entries(current).forEach(([sessionId, count]) => {
+        if (sessionIds.has(sessionId)) {
+          next[sessionId] = count;
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : current;
+    });
+  }, [sessions]);
+
+  useEffect(() => {
+    statusesRef.current = statuses;
+  }, [statuses]);
+
+  useEffect(() => {
+    notificationsEnabledRef.current = notificationsEnabled;
+  }, [notificationsEnabled]);
+
+  const showOutputNotification = useCallback((sessionId: string) => {
+    if (
+      !notificationsEnabledRef.current ||
+      !browserNotificationsSupported() ||
+      Notification.permission !== "granted"
+    ) {
+      return;
+    }
+
+    const sessionName =
+      sessionsRef.current.find((session) => session.id === sessionId)?.name ??
+      sessionId;
+    try {
+      new Notification(`${sessionName} has new output`, {
+        tag: `codex-switchboard-${sessionId}-output`,
+      });
+    } catch {
+      // Browsers may still reject construction despite a granted permission.
+    }
+  }, []);
+
+  const handleInactiveOutput = useCallback(
+    (sessionId: string) => {
+      if (sessionId === selectedSessionIdRef.current) {
+        return;
+      }
+
+      if (statusesRef.current[sessionId]?.state !== "running") {
+        return;
+      }
+
+      setUnreadCounts((current) => ({
+        ...current,
+        [sessionId]: (current[sessionId] ?? 0) + 1,
+      }));
+      showOutputNotification(sessionId);
+    },
+    [showOutputNotification],
+  );
+
+  useEffect(() => {
+    const sessionIds = JSON.parse(runningSessionIdsKey) as string[];
+    if (sessionIds.length === 0) {
+      return undefined;
+    }
+
+    let closed = false;
+    const socket = new WebSocket(wsUrl());
+
+    socket.addEventListener("open", () => {
+      if (closed) {
+        return;
+      }
+      sessionIds.forEach((sessionId) => {
+        socket.send(JSON.stringify({ type: "subscribe", sessionId }));
+      });
+    });
+
+    socket.addEventListener("message", (event) => {
+      let message: WsMessage;
+      try {
+        message = JSON.parse(String(event.data)) as WsMessage;
+      } catch {
+        return;
+      }
+
+      switch (message.type) {
+        case "subscribed":
+          updateStatus(message.status);
+          break;
+        case "terminal.output":
+          handleInactiveOutput(message.sessionId);
+          break;
+        case "session.status":
+          updateStatus(message.status);
+          break;
+        case "error":
+        case "unsubscribed":
+          break;
+      }
+    });
+
+    return () => {
+      closed = true;
+      if (socket.readyState === WebSocket.OPEN) {
+        sessionIds.forEach((sessionId) => {
+          socket.send(JSON.stringify({ type: "unsubscribe", sessionId }));
+        });
+      }
+      socket.close();
+    };
+  }, [handleInactiveOutput, runningSessionIdsKey, updateStatus]);
+
+  const toggleNotifications = useCallback(
+    async (enabled: boolean) => {
+      if (!enabled) {
+        setNotificationsEnabled(false);
+        setNotificationPermission(getNotificationPermission());
+        writeNotificationEnabledPreference(false);
+        return;
+      }
+
+      if (!notificationsSupported) {
+        setNotificationsEnabled(false);
+        setNotificationPermission("denied");
+        writeNotificationEnabledPreference(false);
+        setError("Browser notifications are not supported");
+        return;
+      }
+
+      setError(null);
+      let permission = Notification.permission;
+      if (permission === "default") {
+        permission = await Notification.requestPermission();
+      }
+
+      setNotificationPermission(permission);
+      const granted = permission === "granted";
+      setNotificationsEnabled(granted);
+      writeNotificationEnabledPreference(granted);
+      if (!granted) {
+        setError(
+          permission === "denied"
+            ? "Browser notifications are blocked"
+            : "Browser notifications were not enabled",
+        );
+      }
+    },
+    [notificationsSupported],
+  );
+
   const runAction = useCallback(
     async (sessionId: string, action: "start" | "stop") => {
       setActionSessionId(sessionId);
@@ -335,10 +590,10 @@ function AppShell() {
         body: JSON.stringify(session),
       });
       upsertSession(data.session);
-      setSelectedSessionId(data.session.id);
+      selectSession(data.session.id);
       return data.session;
     },
-    [upsertSession],
+    [selectSession, upsertSession],
   );
 
   const updateSession = useCallback(
@@ -353,10 +608,10 @@ function AppShell() {
         },
       );
       upsertSession(data.session);
-      setSelectedSessionId(data.session.id);
+      selectSession(data.session.id);
       return data.session;
     },
-    [upsertSession],
+    [selectSession, upsertSession],
   );
 
   const deleteSession = useCallback(
@@ -375,6 +630,14 @@ function AppShell() {
         selected === sessionId ? (nextSessions[0]?.id ?? null) : selected,
       );
       setStatuses((current) => {
+        const next = { ...current };
+        delete next[sessionId];
+        return next;
+      });
+      setUnreadCounts((current) => {
+        if (!current[sessionId]) {
+          return current;
+        }
         const next = { ...current };
         delete next[sessionId];
         return next;
@@ -417,12 +680,17 @@ function AppShell() {
         onDeleteSession={deleteSession}
         onEditSession={updateSession}
         onRefresh={loadSessions}
-        onSelect={setSelectedSessionId}
+        onSelect={selectSession}
         onStart={(sessionId) => void runAction(sessionId, "start")}
         onStop={(sessionId) => void runAction(sessionId, "stop")}
+        onToggleNotifications={(enabled) => void toggleNotifications(enabled)}
+        notificationPermission={notificationPermission}
+        notificationsEnabled={notificationsEnabled}
+        notificationsSupported={notificationsSupported}
         selectedSessionId={selectedSessionId}
         sessions={sessions}
         statuses={statuses}
+        unreadCounts={unreadCounts}
       />
       <TerminalPane
         error={error}
@@ -456,9 +724,14 @@ type SessionListProps = {
   onSelect: (sessionId: string) => void;
   onStart: (sessionId: string) => void;
   onStop: (sessionId: string) => void;
+  onToggleNotifications: (enabled: boolean) => void;
+  notificationPermission: NotificationPermission;
+  notificationsEnabled: boolean;
+  notificationsSupported: boolean;
   selectedSessionId: string | null;
   sessions: SessionConfig[];
   statuses: Record<string, RuntimeStatus>;
+  unreadCounts: UnreadCounts;
 };
 
 type SessionDraft = {
@@ -687,9 +960,14 @@ function SessionList({
   onSelect,
   onStart,
   onStop,
+  onToggleNotifications,
+  notificationPermission,
+  notificationsEnabled,
+  notificationsSupported,
   selectedSessionId,
   sessions,
   statuses,
+  unreadCounts,
 }: SessionListProps) {
   const [editor, setEditor] = useState<SessionEditorState | null>(null);
   const [draft, setDraft] = useState<SessionDraft>(() => newSessionDraft());
@@ -813,6 +1091,30 @@ function SessionList({
         </div>
       </div>
 
+      <div className="notification-row">
+        <label className="notification-toggle">
+          <input
+            checked={notificationsEnabled}
+            disabled={!notificationsSupported}
+            onChange={(event) =>
+              onToggleNotifications(event.currentTarget.checked)
+            }
+            type="checkbox"
+          />
+          <span className="toggle-track" aria-hidden="true">
+            <span />
+          </span>
+          <span>Notifications</span>
+        </label>
+        <span className="notification-state">
+          {notificationStatusLabel(
+            notificationsSupported,
+            notificationsEnabled,
+            notificationPermission,
+          )}
+        </span>
+      </div>
+
       {editor ? (
         <form className="side-form" onSubmit={handleSessionSubmit}>
           <div className="form-title-row">
@@ -930,6 +1232,8 @@ function SessionList({
           const isRunning = status?.state === "running";
           const isBusy = actionSessionId === session.id;
           const isDeleting = deletingSessionId === session.id;
+          const unreadCount = unreadCounts[session.id] ?? 0;
+          const unreadLabel = unreadCount > 99 ? "99+" : String(unreadCount);
 
           return (
             <section
@@ -942,7 +1246,17 @@ function SessionList({
                 type="button"
               >
                 <span className="session-title-row">
-                  <span className="session-name">{session.name}</span>
+                  <span className="session-heading">
+                    <span className="session-name">{session.name}</span>
+                    {unreadCount > 0 ? (
+                      <span
+                        aria-label={`${unreadCount} unread output events`}
+                        className="unread-badge"
+                      >
+                        {unreadLabel}
+                      </span>
+                    ) : null}
+                  </span>
                   <span className={`status-pill ${isRunning ? "run" : "stop"}`}>
                     {statusLabel(status)}
                   </span>
@@ -1091,11 +1405,14 @@ function TerminalPane({
   const handleRedraw = useCallback(() => {
     const terminal = terminalRef.current;
     if (terminal) {
+      fitAddonRef.current?.fit();
+      publishTerminalSize(terminal.cols, terminal.rows);
+      sendResize(terminal.cols, terminal.rows);
       terminal.refresh(0, Math.max(0, terminal.rows - 1));
       terminal.focus();
     }
     sendTerminalInput("\x0c", true);
-  }, [sendTerminalInput]);
+  }, [publishTerminalSize, sendResize, sendTerminalInput]);
 
   const flushTerminalWrites = useCallback((generation: number) => {
     const terminal = terminalRef.current;
@@ -1256,7 +1573,13 @@ function TerminalPane({
       }
       resizeFrame = window.requestAnimationFrame(() => {
         resizeFrame = null;
+        const terminal = terminalRef.current;
         fitAddon.fit();
+        if (terminal) {
+          publishTerminalSize(terminal.cols, terminal.rows);
+          sendResize(terminal.cols, terminal.rows);
+          terminal.refresh(0, Math.max(0, terminal.rows - 1));
+        }
       });
     };
 
@@ -1270,7 +1593,7 @@ function TerminalPane({
       }
       resizeObserver.disconnect();
     };
-  }, []);
+  }, [publishTerminalSize, sendResize]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
