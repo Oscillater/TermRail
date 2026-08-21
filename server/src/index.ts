@@ -94,6 +94,7 @@ async function main(): Promise<void> {
   app.get("/api/sessions", (_request, response) => {
     const sessions = configStore.listSessions();
     response.json({
+      prompts: configStore.listPrompts(),
       sessions,
       statuses: Object.fromEntries(
         sessions.map((session) => [
@@ -103,6 +104,18 @@ async function main(): Promise<void> {
       ),
     });
   });
+
+  app.get("/api/prompts", (_request, response) => {
+    response.json({ prompts: configStore.listPrompts() });
+  });
+
+  app.put(
+    "/api/prompts",
+    asyncRoute(async (request, response) => {
+      const prompts = await configStore.updatePrompts(request.body);
+      response.json({ prompts });
+    }),
+  );
 
   app.get(
     "/api/filesystem/roots",

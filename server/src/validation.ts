@@ -38,9 +38,13 @@ function requireId(
   return id;
 }
 
-function parsePrompts(value: unknown, errors: string[]): PromptExample[] {
+function parsePrompts(
+  value: unknown,
+  errors: string[],
+  field = "prompts",
+): PromptExample[] {
   if (!Array.isArray(value)) {
-    errors.push("prompts must be an array");
+    errors.push(`${field} must be an array`);
     return [];
   }
 
@@ -51,24 +55,22 @@ function parsePrompts(value: unknown, errors: string[]): PromptExample[] {
     const promptErrors: string[] = [];
     const record = asRecord(item);
     if (!record) {
-      errors.push(`prompts[${index}] must be an object`);
+      errors.push(`${field}[${index}] must be an object`);
       return;
     }
 
-    const id = requireId(record.id, `prompts[${index}].id`, promptErrors);
+    const id = requireId(record.id, `${field}[${index}].id`, promptErrors);
     const title = cleanString(record.title);
     const text = typeof record.text === "string" ? record.text : null;
 
     if (!title) {
-      promptErrors.push(`prompts[${index}].title must be a non-empty string`);
+      promptErrors.push(`${field}[${index}].title must be a non-empty string`);
     }
     if (text === null) {
-      promptErrors.push(`prompts[${index}].text must be a string`);
+      promptErrors.push(`${field}[${index}].text must be a string`);
     }
     if (id && seen.has(id)) {
-      promptErrors.push(
-        `prompts[${index}].id must be unique within the session`,
-      );
+      promptErrors.push(`${field}[${index}].id must be unique`);
     }
 
     if (promptErrors.length > 0 || !id || !title || text === null) {
@@ -78,6 +80,41 @@ function parsePrompts(value: unknown, errors: string[]): PromptExample[] {
 
     seen.add(id);
     prompts.push({ id, title, text });
+  });
+
+  return prompts;
+}
+
+export function promptsFromInput(value: unknown): PromptExample[] {
+  const errors: string[] = [];
+  const record = asRecord(value);
+  const promptsValue = record && "prompts" in record ? record.prompts : value;
+  const prompts = parsePrompts(promptsValue, errors);
+
+  if (errors.length > 0) {
+    throw new HttpError(
+      400,
+      "INVALID_PROMPTS",
+      "Prompt validation failed",
+      errors,
+    );
+  }
+
+  return prompts;
+}
+
+function collectLegacyPrompts(sessions: SessionConfig[]): PromptExample[] {
+  const prompts: PromptExample[] = [];
+  const seen = new Set<string>();
+
+  sessions.forEach((session) => {
+    session.prompts.forEach((prompt) => {
+      if (seen.has(prompt.id)) {
+        return;
+      }
+      seen.add(prompt.id);
+      prompts.push({ ...prompt });
+    });
   });
 
   return prompts;
@@ -144,7 +181,7 @@ export function sessionsFromConfig(value: unknown): {
 
   if (!record || !Array.isArray(record.sessions)) {
     return {
-      config: { sessions: [] },
+      config: { prompts: [], sessions: [] },
       warnings: ["config must be an object with a sessions array"],
     };
   }
@@ -174,5 +211,14 @@ export function sessionsFromConfig(value: unknown): {
     }
   });
 
-  return { config: { sessions }, warnings };
+  let prompts: PromptExample[] = [];
+  if (record.prompts === undefined) {
+    prompts = collectLegacyPrompts(sessions);
+  } else {
+    const promptWarnings: string[] = [];
+    prompts = parsePrompts(record.prompts, promptWarnings);
+    warnings.push(...promptWarnings);
+  }
+
+  return { config: { prompts, sessions }, warnings };
 }

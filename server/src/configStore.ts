@@ -1,18 +1,26 @@
 import { dirname } from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import type { AppConfig, SessionConfig } from "./types.js";
+import type { AppConfig, PromptExample, SessionConfig } from "./types.js";
 import { HttpError } from "./errors.js";
-import { sessionFromInput, sessionsFromConfig } from "./validation.js";
+import {
+  promptsFromInput,
+  sessionFromInput,
+  sessionsFromConfig,
+} from "./validation.js";
+
+function clonePrompts(prompts: PromptExample[]): PromptExample[] {
+  return prompts.map((prompt) => ({ ...prompt }));
+}
 
 function cloneSession(session: SessionConfig): SessionConfig {
   return {
     ...session,
-    prompts: session.prompts.map((prompt) => ({ ...prompt })),
+    prompts: clonePrompts(session.prompts),
   };
 }
 
 export class ConfigStore {
-  private config: AppConfig = { sessions: [] };
+  private config: AppConfig = { prompts: [], sessions: [] };
 
   constructor(private readonly filePath: string) {}
 
@@ -42,7 +50,7 @@ export class ConfigStore {
       if (error instanceof Error) {
         console.warn(`[config] ${error.message}`);
       }
-      this.config = { sessions: [] };
+      this.config = { prompts: [], sessions: [] };
     }
   }
 
@@ -57,6 +65,10 @@ export class ConfigStore {
 
   listSessions(): SessionConfig[] {
     return this.config.sessions.map(cloneSession);
+  }
+
+  listPrompts(): PromptExample[] {
+    return clonePrompts(this.config.prompts);
   }
 
   getSession(id: string): SessionConfig | null {
@@ -114,6 +126,13 @@ export class ConfigStore {
     this.config.sessions[index] = updated;
     await this.save();
     return cloneSession(updated);
+  }
+
+  async updatePrompts(input: unknown): Promise<PromptExample[]> {
+    const prompts = promptsFromInput(input);
+    this.config.prompts = prompts;
+    await this.save();
+    return clonePrompts(prompts);
   }
 
   async deleteSession(id: string): Promise<SessionConfig> {

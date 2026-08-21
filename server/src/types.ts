@@ -13,6 +13,7 @@ export type SessionConfig = {
 };
 
 export type AppConfig = {
+  prompts: PromptExample[];
   sessions: SessionConfig[];
 };
 

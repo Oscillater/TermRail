@@ -5,7 +5,7 @@
 - [x] Session 1：项目骨架 + 后端基础能力。
 - [x] Session 2：最小浏览器 terminal UI，接上 session 列表、启动/停止、WebSocket 输入输出。
 - [x] Session 3：session 编辑 UI + prompt examples 的增删改、Copy / Insert / Send。
-- [x] Session 4：未读 badge、浏览器通知、交互打磨和第一版可用性验证。
+- [x] Session 4：输出活动状态、停止提示、交互打磨和第一版可用性验证。
 
 估计还需要 **1 个 session** 做到第一版可用；如果想把交互、错误状态、移动端和真实 Codex CLI 场景打磨得更稳，按 **2 个 session** 预留更合理。
 
@@ -17,8 +17,8 @@
 
 - 启动已配置的 Codex session
 - 在多个 live terminal 之间切换
-- 显示未读输出
-- 保存每个 session 自己的 prompt examples
+- 显示 agent 输出活动和停止提示
+- 保存全局 prompt examples，并在多个 sessions 之间共享
 - 复制、插入或直接发送 prompt examples
 
 ## 非目标
@@ -109,6 +109,10 @@ type PromptExample = {
 - [x] 浏览器 terminal resize 时，同步 resize PTY。
 - [x] 启动 PTY 时使用浏览器当前 terminal 尺寸，减少 TUI 首屏错乱。
 - [x] 为 Codex resume / TUI 场景提供手动 Redraw 重绘操作。
+- [x] terminal 有选区时 `Ctrl+C` 复制文本；无选区时仍发送中断。
+- [x] terminal 聚焦时 `Ctrl+V` 粘贴剪贴板内容。
+- [x] 多个 running session 输出时，左侧 activity / session 列表保持稳定，不随输出包频繁跳动。
+- [x] 未点开的 running session 也在 Activity 中显示稳定状态。
 - [x] server 运行期间，为每个 active session 保留 terminal buffer。
 
 ### 5. 前端布局
@@ -120,33 +124,32 @@ type PromptExample = {
 - [x] 编辑 session 按钮。
 - [x] session 表单支持浏览并选择本机文件夹作为 `cwd`。
 - [x] 启动/停止状态指示。
-- [x] inactive session 的未读 badge。
+- [x] session 的输出活动状态 badge。
 
 ### 6. Prompt Examples
 
-- [x] 每个 session 的 prompt list 初始为空。
+- [x] 全局 prompt list 初始为空。
 - [x] UI 支持添加、编辑、删除 prompt examples。
+- [x] 未保存的 prompt 表单草稿缓存在浏览器本地 JSON 中。
 - [x] 每条 prompt 支持三个操作：
   - [x] `Copy`：复制到剪贴板。
   - [x] `Insert`：插入到当前 terminal 输入区。
   - [x] `Send`：发送文本并追加换行到当前 Codex session。
 
-### 7. 未读输出
+### 7. 输出活动状态
 
 - [x] 前端记录当前选中的 active session。
-- [x] inactive session 收到输出时：
-  - [x] 未读数加一
-  - [x] 在左侧 sidebar 显示 badge
-- [x] 切换到该 session 时清空未读数。
+- [x] session 收到输出时标记为 `Working`。
+- [x] 输出安静一小段时间后标记为 `Quiet`。
+- [x] 进程从 running 变 stopped 时标记为 `Stopped`。
+- [x] 切换到该 session 时清空活动提示。
 
-### 8. 通知
+### 8. 面板内活动提示
 
-- [x] 请求浏览器通知权限。
-- [x] inactive session 收到输出时：
-  - [x] 显示浏览器通知
-- [x] 添加开关：启用/关闭通知。
-- [x] 通知文案保持极简：
-  - [x] `<session name> has new output`
+- [x] 不请求浏览器通知权限。
+- [x] Activity 区域列出 `Working` / `Quiet` / `Stopped` sessions。
+- [x] `Working` 保持低调，`Quiet` / `Stopped` 作为回看提示。
+- [x] 不弹出系统/浏览器通知。
 
 ### 9. 安全边界
 
@@ -165,14 +168,14 @@ type PromptExample = {
 - [x] 我可以向当前 Codex session 输入内容。
 - [x] 我可以手动添加 prompt examples。
 - [x] 我可以把保存的 prompt 发送给当前 session。
-- [x] 其他 session 有输出时，我能看到未读 badge。
-- [x] inactive session 有输出时，我能收到浏览器通知。
+- [x] agent 有输出时，我能看到低调的 `Working` 状态。
+- [x] agent 输出停止或进程停止时，我能在面板里看到轻量提示。
 
 ## 后续想法
 
 - 应用启动时自动启动指定 sessions。
 - session 分组或标签。
-- 全局 prompt examples，在多个 sessions 之间共享。
+- prompt examples 分组、搜索和导入/导出。
 - 配置导入/导出。
 - 更好的手机端布局。
 - PWA install 支持。

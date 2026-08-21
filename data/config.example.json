@@ -1,4 +1,5 @@
 {
+  "prompts": [],
   "sessions": [
     {
       "id": "test-powershell-echo",

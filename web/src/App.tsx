@@ -38,12 +38,17 @@ type RuntimeStatus = {
 };
 
 type SessionsResponse = {
+  prompts?: PromptExample[];
   sessions: SessionConfig[];
   statuses: Record<string, RuntimeStatus>;
 };
 
 type SessionResponse = {
   session: SessionConfig;
+};
+
+type PromptsResponse = {
+  prompts: PromptExample[];
 };
 
 type StatusResponse = {
@@ -60,7 +65,14 @@ type TerminalSize = {
   rows: number;
 };
 
-type UnreadCounts = Record<string, number>;
+type OutputActivityState = "running" | "working" | "quiet" | "stopped";
+
+type OutputActivity = {
+  state: OutputActivityState;
+  updatedAt: number;
+};
+
+type OutputActivities = Record<string, OutputActivity>;
 
 type DirectoryEntry = {
   name: string;
@@ -99,7 +111,7 @@ const terminalSizeLimits = {
   minRows: 3,
   maxRows: 200,
 };
-const notificationPreferenceKey = "codex-switchboard.notificationsEnabled";
+const outputQuietDelayMs = 3_000;
 
 function makeLocalId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random()
@@ -118,6 +130,23 @@ function defaultRuntimeStatus(sessionId: string): RuntimeStatus {
     pid: null,
     bufferLength: 0,
   };
+}
+
+function collectSessionPrompts(sessions: SessionConfig[]): PromptExample[] {
+  const prompts: PromptExample[] = [];
+  const seen = new Set<string>();
+
+  sessions.forEach((session) => {
+    session.prompts.forEach((prompt) => {
+      if (seen.has(prompt.id)) {
+        return;
+      }
+      seen.add(prompt.id);
+      prompts.push({ ...prompt });
+    });
+  });
+
+  return prompts;
 }
 
 function clampValue(value: number, min: number, max: number): number {
@@ -175,6 +204,14 @@ async function writeClipboardText(text: string): Promise<void> {
   }
 }
 
+async function readClipboardText(): Promise<string> {
+  if (navigator.clipboard?.readText && window.isSecureContext) {
+    return await navigator.clipboard.readText();
+  }
+
+  throw new Error("Clipboard paste was blocked by the browser");
+}
+
 function wsUrl(): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const url = new URL(`${protocol}//${window.location.host}/ws`);
@@ -227,78 +264,70 @@ function statusLabel(status: RuntimeStatus | undefined): string {
   return status?.state === "running" ? "Running" : "Stopped";
 }
 
-function browserNotificationsSupported(): boolean {
-  return typeof window !== "undefined" && "Notification" in window;
-}
-
-function getNotificationPermission(): NotificationPermission {
-  return browserNotificationsSupported() ? Notification.permission : "denied";
-}
-
-function readNotificationEnabledPreference(): boolean {
-  if (
-    !browserNotificationsSupported() ||
-    Notification.permission !== "granted"
-  ) {
-    return false;
-  }
-
-  try {
-    return window.localStorage.getItem(notificationPreferenceKey) === "true";
-  } catch {
-    return false;
+function outputActivityLabel(state: OutputActivityState): string {
+  switch (state) {
+    case "running":
+      return "Running";
+    case "working":
+      return "Working";
+    case "quiet":
+      return "Quiet";
+    case "stopped":
+      return "Stopped";
   }
 }
 
-function writeNotificationEnabledPreference(enabled: boolean): void {
-  try {
-    window.localStorage.setItem(notificationPreferenceKey, String(enabled));
-  } catch {
-    // Notification preference persistence is best-effort.
+function outputActivityDetail(activity: OutputActivity): string {
+  switch (activity.state) {
+    case "running":
+      return "Process running";
+    case "working":
+      return "Output is streaming";
+    case "quiet":
+      return "Output paused";
+    case "stopped":
+      return "Process stopped";
   }
 }
 
-function notificationStatusLabel(
-  supported: boolean,
-  enabled: boolean,
-  permission: NotificationPermission,
-): string {
-  if (!supported) {
-    return "Unsupported";
+function activitySortValue(state: OutputActivityState): number {
+  switch (state) {
+    case "quiet":
+      return 0;
+    case "stopped":
+      return 1;
+    case "working":
+      return 2;
+    case "running":
+      return 3;
   }
-  if (enabled && permission === "granted") {
-    return "On";
-  }
-  if (permission === "denied") {
-    return "Blocked";
-  }
-  return "Off";
 }
 
 function AppShell() {
+  const [prompts, setPrompts] = useState<PromptExample[]>([]);
+  const [promptsLoaded, setPromptsLoaded] = useState(false);
   const [sessions, setSessions] = useState<SessionConfig[]>([]);
   const [statuses, setStatuses] = useState<Record<string, RuntimeStatus>>({});
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null,
   );
-  const [unreadCounts, setUnreadCounts] = useState<UnreadCounts>({});
-  const [notificationsEnabled, setNotificationsEnabled] = useState(
-    readNotificationEnabledPreference,
+  const [outputActivities, setOutputActivities] = useState<OutputActivities>(
+    {},
   );
-  const [notificationPermission, setNotificationPermission] =
-    useState<NotificationPermission>(getNotificationPermission);
   const [loading, setLoading] = useState(true);
   const [actionSessionId, setActionSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [terminalInputRequest, setTerminalInputRequest] =
     useState<TerminalInputRequest | null>(null);
   const [terminalSize, setTerminalSize] = useState<TerminalSize | null>(null);
-  const selectedSessionIdRef = useRef<string | null>(null);
   const sessionsRef = useRef<SessionConfig[]>([]);
   const statusesRef = useRef<Record<string, RuntimeStatus>>({});
-  const notificationsEnabledRef = useRef(notificationsEnabled);
+  const outputQuietTimersRef = useRef<Record<string, number>>({});
+  const outputActivityStatesRef = useRef<Record<string, OutputActivityState>>(
+    {},
+  );
+  const outputLastAtRef = useRef<Record<string, number>>({});
   const terminalInputRequestIdRef = useRef(0);
-  const notificationsSupported = browserNotificationsSupported();
 
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedSessionId) ?? null,
@@ -308,23 +337,108 @@ function AppShell() {
     ? statuses[selectedSessionId]
     : undefined;
 
-  const runningSessionIdsKey = useMemo(
-    () =>
-      JSON.stringify(
-        sessions
-          .filter((session) => statuses[session.id]?.state === "running")
-          .map((session) => session.id),
-      ),
-    [sessions, statuses],
+  const subscribedSessionIdsKey = useMemo(
+    () => JSON.stringify(sessions.map((session) => session.id)),
+    [sessions],
   );
 
   const updateStatus = useCallback((status: RuntimeStatus) => {
+    statusesRef.current = {
+      ...statusesRef.current,
+      [status.sessionId]: status,
+    };
     setStatuses((current) => ({ ...current, [status.sessionId]: status }));
   }, []);
 
-  const clearUnread = useCallback((sessionId: string) => {
-    setUnreadCounts((current) => {
-      if (!current[sessionId]) {
+  const clearOutputTimer = useCallback((sessionId: string) => {
+    const timerId = outputQuietTimersRef.current[sessionId];
+    if (timerId !== undefined) {
+      window.clearTimeout(timerId);
+      delete outputQuietTimersRef.current[sessionId];
+    }
+  }, []);
+
+  const clearOutputActivity = useCallback(
+    (sessionId: string) => {
+      clearOutputTimer(sessionId);
+      delete outputActivityStatesRef.current[sessionId];
+      delete outputLastAtRef.current[sessionId];
+      setOutputActivities((current) => {
+        if (!current[sessionId]) {
+          return current;
+        }
+        const next = { ...current };
+        delete next[sessionId];
+        return next;
+      });
+    },
+    [clearOutputTimer],
+  );
+
+  const scheduleQuietActivity = useCallback(
+    (sessionId: string, lastOutputAt: number) => {
+      clearOutputTimer(sessionId);
+      outputQuietTimersRef.current[sessionId] = window.setTimeout(() => {
+        delete outputQuietTimersRef.current[sessionId];
+        if (outputLastAtRef.current[sessionId] !== lastOutputAt) {
+          return;
+        }
+        if (outputActivityStatesRef.current[sessionId] !== "working") {
+          return;
+        }
+        outputActivityStatesRef.current[sessionId] = "quiet";
+        setOutputActivities((current) => {
+          const activity = current[sessionId];
+          if (!activity || activity.state !== "working") {
+            return current;
+          }
+          return {
+            ...current,
+            [sessionId]: {
+              ...activity,
+              state: "quiet",
+              updatedAt: Date.now(),
+            },
+          };
+        });
+      }, outputQuietDelayMs);
+    },
+    [clearOutputTimer],
+  );
+
+  const markStoppedActivity = useCallback(
+    (sessionId: string) => {
+      clearOutputTimer(sessionId);
+      delete outputLastAtRef.current[sessionId];
+      if (outputActivityStatesRef.current[sessionId] === "stopped") {
+        return;
+      }
+      outputActivityStatesRef.current[sessionId] = "stopped";
+      setOutputActivities((current) => {
+        const activity = current[sessionId];
+        if (activity?.state === "stopped") {
+          return current;
+        }
+        return {
+          ...current,
+          [sessionId]: {
+            ...(activity ?? {}),
+            state: "stopped",
+            updatedAt: Date.now(),
+          },
+        };
+      });
+    },
+    [clearOutputTimer],
+  );
+
+  const markRunningActivity = useCallback((sessionId: string) => {
+    if (outputActivityStatesRef.current[sessionId] !== "stopped") {
+      return;
+    }
+    delete outputActivityStatesRef.current[sessionId];
+    setOutputActivities((current) => {
+      if (current[sessionId]?.state !== "stopped") {
         return current;
       }
       const next = { ...current };
@@ -335,11 +449,10 @@ function AppShell() {
 
   const selectSession = useCallback(
     (sessionId: string) => {
-      selectedSessionIdRef.current = sessionId;
       setSelectedSessionId(sessionId);
-      clearUnread(sessionId);
+      clearOutputActivity(sessionId);
     },
-    [clearUnread],
+    [clearOutputActivity],
   );
 
   const upsertSession = useCallback((session: SessionConfig) => {
@@ -351,6 +464,11 @@ function AppShell() {
 
       return current.map((item) => (item.id === session.id ? session : item));
     });
+    statusesRef.current = {
+      ...statusesRef.current,
+      [session.id]:
+        statusesRef.current[session.id] ?? defaultRuntimeStatus(session.id),
+    };
     setStatuses((current) => ({
       ...current,
       [session.id]: current[session.id] ?? defaultRuntimeStatus(session.id),
@@ -362,7 +480,10 @@ function AppShell() {
     setError(null);
     try {
       const data = await apiRequest<SessionsResponse>("/api/sessions");
+      setPrompts(data.prompts ?? collectSessionPrompts(data.sessions));
+      setPromptsLoaded(true);
       setSessions(data.sessions);
+      statusesRef.current = data.statuses;
       setStatuses(data.statuses);
       setSelectedSessionId((current) => {
         if (
@@ -389,167 +510,157 @@ function AppShell() {
   }, [loadSessions]);
 
   useEffect(() => {
-    selectedSessionIdRef.current = selectedSessionId;
     if (selectedSessionId) {
-      clearUnread(selectedSessionId);
+      clearOutputActivity(selectedSessionId);
     }
-  }, [clearUnread, selectedSessionId]);
+  }, [clearOutputActivity, selectedSessionId]);
 
   useEffect(() => {
     sessionsRef.current = sessions;
     const sessionIds = new Set(sessions.map((session) => session.id));
-    setUnreadCounts((current) => {
+    setOutputActivities((current) => {
       let changed = false;
-      const next: UnreadCounts = {};
-      Object.entries(current).forEach(([sessionId, count]) => {
+      const next: OutputActivities = {};
+      Object.entries(current).forEach(([sessionId, activity]) => {
         if (sessionIds.has(sessionId)) {
-          next[sessionId] = count;
+          next[sessionId] = activity;
         } else {
+          clearOutputTimer(sessionId);
+          delete outputActivityStatesRef.current[sessionId];
+          delete outputLastAtRef.current[sessionId];
           changed = true;
         }
       });
       return changed ? next : current;
     });
-  }, [sessions]);
+  }, [clearOutputTimer, sessions]);
 
   useEffect(() => {
-    statusesRef.current = statuses;
-  }, [statuses]);
-
-  useEffect(() => {
-    notificationsEnabledRef.current = notificationsEnabled;
-  }, [notificationsEnabled]);
-
-  const showOutputNotification = useCallback((sessionId: string) => {
-    if (
-      !notificationsEnabledRef.current ||
-      !browserNotificationsSupported() ||
-      Notification.permission !== "granted"
-    ) {
-      return;
-    }
-
-    const sessionName =
-      sessionsRef.current.find((session) => session.id === sessionId)?.name ??
-      sessionId;
-    try {
-      new Notification(`${sessionName} has new output`, {
-        tag: `codex-switchboard-${sessionId}-output`,
+    return () => {
+      Object.values(outputQuietTimersRef.current).forEach((timerId) => {
+        window.clearTimeout(timerId);
       });
-    } catch {
-      // Browsers may still reject construction despite a granted permission.
-    }
+      outputQuietTimersRef.current = {};
+      outputActivityStatesRef.current = {};
+      outputLastAtRef.current = {};
+    };
   }, []);
 
-  const handleInactiveOutput = useCallback(
+  const handleSessionOutput = useCallback(
     (sessionId: string) => {
-      if (sessionId === selectedSessionIdRef.current) {
+      if (!sessionsRef.current.some((session) => session.id === sessionId)) {
         return;
       }
 
-      if (statusesRef.current[sessionId]?.state !== "running") {
-        return;
+      const now = Date.now();
+      outputLastAtRef.current[sessionId] = now;
+      if (outputActivityStatesRef.current[sessionId] !== "working") {
+        outputActivityStatesRef.current[sessionId] = "working";
+        setOutputActivities((current) => ({
+          ...current,
+          [sessionId]: {
+            state: "working",
+            updatedAt: now,
+          },
+        }));
       }
-
-      setUnreadCounts((current) => ({
-        ...current,
-        [sessionId]: (current[sessionId] ?? 0) + 1,
-      }));
-      showOutputNotification(sessionId);
+      scheduleQuietActivity(sessionId, now);
     },
-    [showOutputNotification],
+    [scheduleQuietActivity],
+  );
+
+  const handleSessionStatus = useCallback(
+    (status: RuntimeStatus) => {
+      const previousStatus = statusesRef.current[status.sessionId];
+      updateStatus(status);
+      if (status.state === "running") {
+        markRunningActivity(status.sessionId);
+      }
+      if (previousStatus?.state === "running" && status.state === "stopped") {
+        markStoppedActivity(status.sessionId);
+      }
+    },
+    [markRunningActivity, markStoppedActivity, updateStatus],
   );
 
   useEffect(() => {
-    const sessionIds = JSON.parse(runningSessionIdsKey) as string[];
+    const sessionIds = JSON.parse(subscribedSessionIdsKey) as string[];
     if (sessionIds.length === 0) {
       return undefined;
     }
 
     let closed = false;
-    const socket = new WebSocket(wsUrl());
+    let reconnectTimerId: number | null = null;
+    let socket: WebSocket | null = null;
 
-    socket.addEventListener("open", () => {
-      if (closed) {
-        return;
-      }
-      sessionIds.forEach((sessionId) => {
-        socket.send(JSON.stringify({ type: "subscribe", sessionId }));
+    const connect = () => {
+      const nextSocket = new WebSocket(wsUrl());
+      socket = nextSocket;
+
+      nextSocket.addEventListener("open", () => {
+        if (closed || socket !== nextSocket) {
+          return;
+        }
+        sessionIds.forEach((sessionId) => {
+          nextSocket.send(JSON.stringify({ type: "subscribe", sessionId }));
+        });
       });
-    });
 
-    socket.addEventListener("message", (event) => {
-      let message: WsMessage;
-      try {
-        message = JSON.parse(String(event.data)) as WsMessage;
-      } catch {
-        return;
-      }
+      nextSocket.addEventListener("message", (event) => {
+        if (closed || socket !== nextSocket) {
+          return;
+        }
 
-      switch (message.type) {
-        case "subscribed":
-          updateStatus(message.status);
-          break;
-        case "terminal.output":
-          handleInactiveOutput(message.sessionId);
-          break;
-        case "session.status":
-          updateStatus(message.status);
-          break;
-        case "error":
-        case "unsubscribed":
-          break;
-      }
-    });
+        let message: WsMessage;
+        try {
+          message = JSON.parse(String(event.data)) as WsMessage;
+        } catch {
+          return;
+        }
+
+        switch (message.type) {
+          case "subscribed":
+            handleSessionStatus(message.status);
+            break;
+          case "terminal.output":
+            handleSessionOutput(message.sessionId);
+            break;
+          case "session.status":
+            handleSessionStatus(message.status);
+            break;
+          case "error":
+          case "unsubscribed":
+            break;
+        }
+      });
+
+      nextSocket.addEventListener("close", () => {
+        if (closed || socket !== nextSocket) {
+          return;
+        }
+        reconnectTimerId = window.setTimeout(connect, 1_000);
+      });
+
+      nextSocket.addEventListener("error", () => {
+        nextSocket.close();
+      });
+    };
+
+    connect();
 
     return () => {
       closed = true;
-      if (socket.readyState === WebSocket.OPEN) {
+      if (reconnectTimerId !== null) {
+        window.clearTimeout(reconnectTimerId);
+      }
+      if (socket?.readyState === WebSocket.OPEN) {
         sessionIds.forEach((sessionId) => {
-          socket.send(JSON.stringify({ type: "unsubscribe", sessionId }));
+          socket?.send(JSON.stringify({ type: "unsubscribe", sessionId }));
         });
       }
-      socket.close();
+      socket?.close();
     };
-  }, [handleInactiveOutput, runningSessionIdsKey, updateStatus]);
-
-  const toggleNotifications = useCallback(
-    async (enabled: boolean) => {
-      if (!enabled) {
-        setNotificationsEnabled(false);
-        setNotificationPermission(getNotificationPermission());
-        writeNotificationEnabledPreference(false);
-        return;
-      }
-
-      if (!notificationsSupported) {
-        setNotificationsEnabled(false);
-        setNotificationPermission("denied");
-        writeNotificationEnabledPreference(false);
-        setError("Browser notifications are not supported");
-        return;
-      }
-
-      setError(null);
-      let permission = Notification.permission;
-      if (permission === "default") {
-        permission = await Notification.requestPermission();
-      }
-
-      setNotificationPermission(permission);
-      const granted = permission === "granted";
-      setNotificationsEnabled(granted);
-      writeNotificationEnabledPreference(granted);
-      if (!granted) {
-        setError(
-          permission === "denied"
-            ? "Browser notifications are blocked"
-            : "Browser notifications were not enabled",
-        );
-      }
-    },
-    [notificationsSupported],
-  );
+  }, [handleSessionOutput, handleSessionStatus, subscribedSessionIdsKey]);
 
   const runAction = useCallback(
     async (sessionId: string, action: "start" | "stop") => {
@@ -567,7 +678,7 @@ function AppShell() {
           `/api/sessions/${encodeURIComponent(sessionId)}/${action}`,
           { method: "POST", ...startOptions },
         );
-        updateStatus(data.status);
+        handleSessionStatus(data.status);
       } catch (requestError) {
         setError(
           requestError instanceof Error
@@ -578,7 +689,7 @@ function AppShell() {
         setActionSessionId(null);
       }
     },
-    [terminalSize, updateStatus],
+    [handleSessionStatus, terminalSize],
   );
 
   const createSession = useCallback(
@@ -632,9 +743,13 @@ function AppShell() {
       setStatuses((current) => {
         const next = { ...current };
         delete next[sessionId];
+        delete statusesRef.current[sessionId];
         return next;
       });
-      setUnreadCounts((current) => {
+      clearOutputTimer(sessionId);
+      delete outputActivityStatesRef.current[sessionId];
+      delete outputLastAtRef.current[sessionId];
+      setOutputActivities((current) => {
         if (!current[sessionId]) {
           return current;
         }
@@ -643,25 +758,19 @@ function AppShell() {
         return next;
       });
     },
-    [sessions],
+    [clearOutputTimer, sessions],
   );
 
-  const updatePrompts = useCallback(
-    async (sessionId: string, prompts: PromptExample[]) => {
-      setError(null);
-      const data = await apiRequest<SessionResponse>(
-        `/api/sessions/${encodeURIComponent(sessionId)}`,
-        {
-          method: "PATCH",
-          headers: jsonHeaders(),
-          body: JSON.stringify({ prompts }),
-        },
-      );
-      upsertSession(data.session);
-      return data.session;
-    },
-    [upsertSession],
-  );
+  const updatePrompts = useCallback(async (nextPrompts: PromptExample[]) => {
+    setError(null);
+    const data = await apiRequest<PromptsResponse>("/api/prompts", {
+      method: "PUT",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ prompts: nextPrompts }),
+    });
+    setPrompts(data.prompts);
+    return data.prompts;
+  }, []);
 
   const requestTerminalInput = useCallback((data: string) => {
     terminalInputRequestIdRef.current += 1;
@@ -683,27 +792,26 @@ function AppShell() {
         onSelect={selectSession}
         onStart={(sessionId) => void runAction(sessionId, "start")}
         onStop={(sessionId) => void runAction(sessionId, "stop")}
-        onToggleNotifications={(enabled) => void toggleNotifications(enabled)}
-        notificationPermission={notificationPermission}
-        notificationsEnabled={notificationsEnabled}
-        notificationsSupported={notificationsSupported}
         selectedSessionId={selectedSessionId}
         sessions={sessions}
+        outputActivities={outputActivities}
         statuses={statuses}
-        unreadCounts={unreadCounts}
       />
       <TerminalPane
         error={error}
         inputRequest={terminalInputRequest}
         onError={setError}
+        onOutput={handleSessionOutput}
         onSize={setTerminalSize}
-        onStatus={updateStatus}
+        onStatus={handleSessionStatus}
         session={selectedSession}
         status={selectedStatus}
       />
       <PromptExamples
         onTerminalInput={requestTerminalInput}
         onUpdatePrompts={updatePrompts}
+        prompts={prompts}
+        promptsLoaded={promptsLoaded}
         session={selectedSession}
         status={selectedStatus}
       />
@@ -724,14 +832,10 @@ type SessionListProps = {
   onSelect: (sessionId: string) => void;
   onStart: (sessionId: string) => void;
   onStop: (sessionId: string) => void;
-  onToggleNotifications: (enabled: boolean) => void;
-  notificationPermission: NotificationPermission;
-  notificationsEnabled: boolean;
-  notificationsSupported: boolean;
+  outputActivities: OutputActivities;
   selectedSessionId: string | null;
   sessions: SessionConfig[];
   statuses: Record<string, RuntimeStatus>;
-  unreadCounts: UnreadCounts;
 };
 
 type SessionDraft = {
@@ -739,7 +843,6 @@ type SessionDraft = {
   name: string;
   cwd: string;
   command: string;
-  promptsJson: string;
 };
 
 type SessionEditorState = {
@@ -753,7 +856,6 @@ function newSessionDraft(): SessionDraft {
     name: "",
     cwd: ".",
     command: "",
-    promptsJson: "[]",
   };
 }
 
@@ -763,22 +865,7 @@ function draftFromSession(session: SessionConfig): SessionDraft {
     name: session.name,
     cwd: session.cwd,
     command: session.command,
-    promptsJson: JSON.stringify(session.prompts, null, 2),
   };
-}
-
-function parsePromptsJson(value: string): PromptExample[] {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return [];
-  }
-
-  const parsed = JSON.parse(trimmed) as unknown;
-  if (!Array.isArray(parsed)) {
-    throw new Error("prompts must be a JSON array");
-  }
-
-  return parsed as PromptExample[];
 }
 
 function messageFromError(error: unknown, fallback: string): string {
@@ -960,14 +1047,10 @@ function SessionList({
   onSelect,
   onStart,
   onStop,
-  onToggleNotifications,
-  notificationPermission,
-  notificationsEnabled,
-  notificationsSupported,
+  outputActivities,
   selectedSessionId,
   sessions,
   statuses,
-  unreadCounts,
 }: SessionListProps) {
   const [editor, setEditor] = useState<SessionEditorState | null>(null);
   const [draft, setDraft] = useState<SessionDraft>(() => newSessionDraft());
@@ -976,6 +1059,49 @@ function SessionList({
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(
     null,
+  );
+  const visibleActivityItems = sessions
+    .map((session, index) => {
+      const outputActivity = outputActivities[session.id];
+      const status = statuses[session.id];
+      const activity =
+        outputActivity ??
+        (status?.state === "running"
+          ? {
+              state: "running" as const,
+              updatedAt: 0,
+            }
+          : undefined);
+
+      return { activity, index, session };
+    })
+    .filter(
+      (
+        item,
+      ): item is {
+        activity: OutputActivity;
+        index: number;
+        session: SessionConfig;
+      } => Boolean(item.activity),
+    );
+  const quietActivityCount = visibleActivityItems.filter(
+    (item) =>
+      item.activity.state === "quiet" || item.activity.state === "stopped",
+  ).length;
+  const activeActivityCount = visibleActivityItems.filter(
+    (item) =>
+      item.activity.state === "working" || item.activity.state === "running",
+  ).length;
+  const activitySummary =
+    quietActivityCount > 0
+      ? `${quietActivityCount} ready`
+      : activeActivityCount > 0
+        ? `${activeActivityCount} active`
+        : "Idle";
+  const sortedActivityItems = [...visibleActivityItems].sort(
+    (left, right) =>
+      activitySortValue(left.activity.state) -
+        activitySortValue(right.activity.state) || left.index - right.index,
   );
 
   const openCreateEditor = () => {
@@ -1005,20 +1131,17 @@ function SessionList({
 
     setFormError(null);
 
-    let prompts: PromptExample[];
-    try {
-      prompts = parsePromptsJson(draft.promptsJson);
-    } catch (error) {
-      setFormError(messageFromError(error, "Invalid prompts JSON"));
-      return;
-    }
+    const existingSession =
+      editor.mode === "edit"
+        ? sessions.find((session) => session.id === editor.originalId)
+        : null;
 
     const session: SessionConfig = {
       id: draft.id.trim(),
       name: draft.name.trim(),
       cwd: draft.cwd.trim(),
       command: draft.command.trim(),
-      prompts,
+      prompts: existingSession?.prompts ?? [],
     };
 
     if (!session.id || !session.name || !session.cwd || !session.command) {
@@ -1091,28 +1214,35 @@ function SessionList({
         </div>
       </div>
 
-      <div className="notification-row">
-        <label className="notification-toggle">
-          <input
-            checked={notificationsEnabled}
-            disabled={!notificationsSupported}
-            onChange={(event) =>
-              onToggleNotifications(event.currentTarget.checked)
-            }
-            type="checkbox"
-          />
-          <span className="toggle-track" aria-hidden="true">
-            <span />
-          </span>
-          <span>Notifications</span>
-        </label>
-        <span className="notification-state">
-          {notificationStatusLabel(
-            notificationsSupported,
-            notificationsEnabled,
-            notificationPermission,
-          )}
-        </span>
+      <div className="activity-box" aria-live="polite">
+        <div className="activity-header">
+          <span className="activity-title">Activity</span>
+          <span className="activity-count">{activitySummary}</span>
+        </div>
+        {sortedActivityItems.length > 0 ? (
+          <div className="activity-list">
+            {sortedActivityItems.map(({ activity, session }) => (
+              <button
+                className={`activity-item ${activity.state}`}
+                key={session.id}
+                onClick={() => onSelect(session.id)}
+                type="button"
+              >
+                <span className="activity-item-main">
+                  <span className="activity-item-name">{session.name}</span>
+                  <span className="activity-item-detail">
+                    {outputActivityDetail(activity)}
+                  </span>
+                </span>
+                <span className={`activity-state ${activity.state}`}>
+                  {outputActivityLabel(activity.state)}
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="activity-empty">No paused output.</p>
+        )}
       </div>
 
       {editor ? (
@@ -1186,18 +1316,6 @@ function SessionList({
               value={draft.command}
             />
           </label>
-          <label>
-            <span>Prompts</span>
-            <textarea
-              disabled={saving}
-              onChange={(event) =>
-                updateDraft("promptsJson", event.target.value)
-              }
-              rows={7}
-              spellCheck={false}
-              value={draft.promptsJson}
-            />
-          </label>
           <div className="form-actions">
             <button className="primary-button" disabled={saving} type="submit">
               {saving ? "Saving" : "Save"}
@@ -1232,8 +1350,7 @@ function SessionList({
           const isRunning = status?.state === "running";
           const isBusy = actionSessionId === session.id;
           const isDeleting = deletingSessionId === session.id;
-          const unreadCount = unreadCounts[session.id] ?? 0;
-          const unreadLabel = unreadCount > 99 ? "99+" : String(unreadCount);
+          const activity = outputActivities[session.id];
 
           return (
             <section
@@ -1247,22 +1364,35 @@ function SessionList({
               >
                 <span className="session-title-row">
                   <span className="session-heading">
-                    <span className="session-name">{session.name}</span>
-                    {unreadCount > 0 ? (
-                      <span
-                        aria-label={`${unreadCount} unread output events`}
-                        className="unread-badge"
-                      >
-                        {unreadLabel}
-                      </span>
-                    ) : null}
+                    <span className="session-name" title={session.name}>
+                      {session.name}
+                    </span>
+                    <span
+                      aria-hidden={activity ? undefined : true}
+                      aria-label={
+                        activity
+                          ? `${outputActivityLabel(
+                              activity.state,
+                            )}: ${outputActivityDetail(activity)}`
+                          : undefined
+                      }
+                      className={`activity-badge ${activity?.state ?? "empty"}`}
+                    >
+                      {activity
+                        ? outputActivityLabel(activity.state)
+                        : "Working"}
+                    </span>
                   </span>
                   <span className={`status-pill ${isRunning ? "run" : "stop"}`}>
                     {statusLabel(status)}
                   </span>
                 </span>
-                <span className="session-meta">{session.cwd}</span>
-                <span className="session-command">{session.command}</span>
+                <span className="session-meta" title={session.cwd}>
+                  {session.cwd}
+                </span>
+                <span className="session-command" title={session.command}>
+                  {session.command}
+                </span>
               </button>
               <div className="session-actions">
                 <button
@@ -1307,6 +1437,7 @@ type TerminalPaneProps = {
   error: string | null;
   inputRequest: TerminalInputRequest | null;
   onError: (message: string | null) => void;
+  onOutput: (sessionId: string) => void;
   onSize: (size: TerminalSize) => void;
   onStatus: (status: RuntimeStatus) => void;
   session: SessionConfig | null;
@@ -1317,6 +1448,7 @@ function TerminalPane({
   error,
   inputRequest,
   onError,
+  onOutput,
   onSize,
   onStatus,
   session,
@@ -1402,7 +1534,7 @@ function TerminalPane({
     socket.send(JSON.stringify({ type: "resize", sessionId, ...size }));
   }, []);
 
-  const handleRedraw = useCallback(() => {
+  const handleFitTerminal = useCallback(() => {
     const terminal = terminalRef.current;
     if (terminal) {
       fitAddonRef.current?.fit();
@@ -1411,8 +1543,71 @@ function TerminalPane({
       terminal.refresh(0, Math.max(0, terminal.rows - 1));
       terminal.focus();
     }
-    sendTerminalInput("\x0c", true);
-  }, [publishTerminalSize, sendResize, sendTerminalInput]);
+  }, [publishTerminalSize, sendResize]);
+
+  const copyTerminalSelection = useCallback(
+    async (terminal: Terminal) => {
+      const selection = terminal.getSelection();
+      if (!selection) {
+        return;
+      }
+
+      try {
+        const textarea = terminal.textarea;
+        let copied = false;
+
+        if (textarea) {
+          const previousValue = textarea.value;
+          const previousSelectionStart = textarea.selectionStart;
+          const previousSelectionEnd = textarea.selectionEnd;
+
+          textarea.value = selection;
+          textarea.focus({ preventScroll: true });
+          textarea.select();
+          copied = document.execCommand("copy");
+          textarea.value = previousValue;
+
+          if (
+            previousSelectionStart !== null &&
+            previousSelectionEnd !== null
+          ) {
+            textarea.setSelectionRange(
+              previousSelectionStart,
+              previousSelectionEnd,
+            );
+          }
+        }
+
+        if (!copied) {
+          await writeClipboardText(selection);
+        }
+
+        terminal.clearSelection();
+        terminal.focus();
+        onError(null);
+      } catch (error) {
+        onError(messageFromError(error, "Failed to copy terminal selection"));
+      }
+    },
+    [onError],
+  );
+
+  const pasteTerminalClipboard = useCallback(
+    async (terminal: Terminal) => {
+      try {
+        const text = await readClipboardText();
+        if (!text) {
+          return;
+        }
+        terminal.paste(text);
+        terminal.focus();
+        onError(null);
+      } catch (error) {
+        onError(messageFromError(error, "Failed to paste clipboard"));
+      }
+    },
+    [onError],
+  );
 
   const flushTerminalWrites = useCallback((generation: number) => {
     const terminal = terminalRef.current;
@@ -1498,7 +1693,7 @@ function TerminalPane({
         'ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace',
       fontSize: 13,
       lineHeight: 1.25,
-      scrollback: 20000,
+      scrollback: 100000,
       theme: {
         background: "#111315",
         black: "#111315",
@@ -1534,6 +1729,29 @@ function TerminalPane({
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
 
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type !== "keydown" || !event.ctrlKey || event.altKey) {
+        return true;
+      }
+
+      const key = event.key.toLowerCase();
+      const isCopyShortcut = key === "c" && terminal.hasSelection();
+      const isPasteShortcut = key === "v";
+
+      if (!isCopyShortcut && !isPasteShortcut) {
+        return true;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      if (isCopyShortcut) {
+        void copyTerminalSelection(terminal);
+      } else {
+        void pasteTerminalClipboard(terminal);
+      }
+      return false;
+    });
+
     const inputDisposable = terminal.onData((data) => {
       sendTerminalInput(data, false);
     });
@@ -1557,7 +1775,13 @@ function TerminalPane({
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [publishTerminalSize, sendResize, sendTerminalInput]);
+  }, [
+    copyTerminalSelection,
+    pasteTerminalClipboard,
+    publishTerminalSize,
+    sendResize,
+    sendTerminalInput,
+  ]);
 
   useEffect(() => {
     const target = containerRef.current;
@@ -1649,6 +1873,7 @@ function TerminalPane({
           break;
         case "terminal.output":
           queueTerminalWrite(message.data);
+          onOutput(message.sessionId);
           break;
         case "session.status":
           onStatus(message.status);
@@ -1679,6 +1904,7 @@ function TerminalPane({
     };
   }, [
     onError,
+    onOutput,
     onStatus,
     publishTerminalSize,
     queueTerminalWrite,
@@ -1707,11 +1933,12 @@ function TerminalPane({
         <div className="terminal-header-actions">
           <button
             className="ghost-button compact"
-            disabled={!running}
-            onClick={handleRedraw}
+            disabled={!session}
+            onClick={handleFitTerminal}
+            title="Fit terminal size"
             type="button"
           >
-            Redraw
+            Fit
           </button>
           <div className="terminal-stats">
             <span className={`status-dot ${running ? "run" : "stop"}`} />
@@ -1739,10 +1966,9 @@ function TerminalPane({
 
 type PromptExamplesProps = {
   onTerminalInput: (data: string) => void;
-  onUpdatePrompts: (
-    sessionId: string,
-    prompts: PromptExample[],
-  ) => Promise<SessionConfig>;
+  onUpdatePrompts: (prompts: PromptExample[]) => Promise<PromptExample[]>;
+  prompts: PromptExample[];
+  promptsLoaded: boolean;
   session: SessionConfig | null;
   status: RuntimeStatus | undefined;
 };
@@ -1758,12 +1984,99 @@ type PromptEditorState = {
   originalId: string | null;
 };
 
+type PromptDraftCacheEntry = {
+  draft: PromptDraft;
+  editor: PromptEditorState;
+  updatedAt: number;
+};
+
+const promptDraftCacheKey = "codex-switchboard.promptDraft.v2";
+
 function newPromptDraft(): PromptDraft {
   return {
     id: makeLocalId("prompt"),
     title: "",
     text: "",
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function promptDraftFromUnknown(value: unknown): PromptDraft | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const { id, title, text } = value;
+  if (
+    typeof id !== "string" ||
+    typeof title !== "string" ||
+    typeof text !== "string"
+  ) {
+    return null;
+  }
+
+  return { id, title, text };
+}
+
+function promptEditorFromUnknown(value: unknown): PromptEditorState | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const mode = value.mode;
+  const originalId = value.originalId;
+  if (
+    (mode !== "create" && mode !== "edit") ||
+    (originalId !== null && typeof originalId !== "string")
+  ) {
+    return null;
+  }
+
+  return { mode, originalId };
+}
+
+function readPromptDraftCacheEntry(): PromptDraftCacheEntry | null {
+  try {
+    const raw = window.localStorage.getItem(promptDraftCacheKey);
+    if (!raw) {
+      return null;
+    }
+
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isRecord(parsed)) {
+      return null;
+    }
+
+    const draft = promptDraftFromUnknown(parsed.draft);
+    const editor = promptEditorFromUnknown(parsed.editor);
+    const updatedAt =
+      typeof parsed.updatedAt === "number" && Number.isFinite(parsed.updatedAt)
+        ? parsed.updatedAt
+        : 0;
+
+    return draft && editor ? { draft, editor, updatedAt } : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePromptDraftCacheEntry(entry: PromptDraftCacheEntry): void {
+  try {
+    window.localStorage.setItem(promptDraftCacheKey, JSON.stringify(entry));
+  } catch {
+    // Draft persistence is best-effort.
+  }
+}
+
+function clearPromptDraftCacheEntry(): void {
+  try {
+    window.localStorage.removeItem(promptDraftCacheKey);
+  } catch {
+    // Draft persistence is best-effort.
+  }
 }
 
 function draftFromPrompt(prompt: PromptExample): PromptDraft {
@@ -1777,10 +2090,11 @@ function draftFromPrompt(prompt: PromptExample): PromptDraft {
 function PromptExamples({
   onTerminalInput,
   onUpdatePrompts,
+  prompts,
+  promptsLoaded,
   session,
   status,
 }: PromptExamplesProps) {
-  const prompts = session?.prompts ?? [];
   const running = status?.state === "running";
   const [editor, setEditor] = useState<PromptEditorState | null>(null);
   const [draft, setDraft] = useState<PromptDraft>(() => newPromptDraft());
@@ -1791,17 +2105,50 @@ function PromptExamples({
   const [deletingPromptId, setDeletingPromptId] = useState<string | null>(null);
 
   useEffect(() => {
-    setEditor(null);
-    setDraft(newPromptDraft());
+    if (!promptsLoaded) {
+      return;
+    }
+
+    const cached = readPromptDraftCacheEntry();
+    const cachedPromptExists =
+      cached?.editor.mode === "create" ||
+      prompts.some((prompt) => prompt.id === cached?.editor.originalId);
+    if (cached && cachedPromptExists) {
+      setEditor(cached.editor);
+      setDraft(cached.draft);
+    } else {
+      setEditor(null);
+      setDraft(newPromptDraft());
+    }
     setFormError(null);
     setNotice(null);
-  }, [session?.id]);
+  }, [prompts, promptsLoaded]);
+
+  useEffect(() => {
+    if (!editor) {
+      return;
+    }
+
+    writePromptDraftCacheEntry({
+      draft,
+      editor,
+      updatedAt: Date.now(),
+    });
+  }, [draft, editor]);
 
   const updateDraft = (field: keyof PromptDraft, value: string) => {
     setDraft((current) => ({ ...current, [field]: value }));
   };
 
+  const closePromptEditor = () => {
+    clearPromptDraftCacheEntry();
+    setEditor(null);
+    setDraft(newPromptDraft());
+    setFormError(null);
+  };
+
   const openCreateEditor = () => {
+    clearPromptDraftCacheEntry();
     setEditor({ mode: "create", originalId: null });
     setDraft(newPromptDraft());
     setFormError(null);
@@ -1809,6 +2156,7 @@ function PromptExamples({
   };
 
   const openEditEditor = (prompt: PromptExample) => {
+    clearPromptDraftCacheEntry();
     setEditor({ mode: "edit", originalId: prompt.id });
     setDraft(draftFromPrompt(prompt));
     setFormError(null);
@@ -1817,7 +2165,7 @@ function PromptExamples({
 
   const handlePromptSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!session || !editor) {
+    if (!editor) {
       return;
     }
 
@@ -1851,8 +2199,10 @@ function PromptExamples({
     setFormError(null);
     setNotice(null);
     try {
-      await onUpdatePrompts(session.id, nextPrompts);
+      await onUpdatePrompts(nextPrompts);
+      clearPromptDraftCacheEntry();
       setEditor(null);
+      setDraft(newPromptDraft());
     } catch (error) {
       setFormError(messageFromError(error, "Failed to save prompt"));
     } finally {
@@ -1861,10 +2211,6 @@ function PromptExamples({
   };
 
   const handleDeletePrompt = async (prompt: PromptExample) => {
-    if (!session) {
-      return;
-    }
-
     const confirmed = window.confirm(`Delete prompt "${prompt.title}"?`);
     if (!confirmed) {
       return;
@@ -1874,12 +2220,11 @@ function PromptExamples({
     setFormError(null);
     setNotice(null);
     try {
-      await onUpdatePrompts(
-        session.id,
-        prompts.filter((item) => item.id !== prompt.id),
-      );
+      await onUpdatePrompts(prompts.filter((item) => item.id !== prompt.id));
       if (editor?.originalId === prompt.id) {
+        clearPromptDraftCacheEntry();
         setEditor(null);
+        setDraft(newPromptDraft());
       }
     } catch (error) {
       setFormError(messageFromError(error, "Failed to delete prompt"));
@@ -1911,7 +2256,7 @@ function PromptExamples({
         </div>
         <button
           className="primary-button"
-          disabled={!session}
+          disabled={!promptsLoaded}
           onClick={openCreateEditor}
           type="button"
         >
@@ -1926,7 +2271,7 @@ function PromptExamples({
             <button
               className="ghost-button compact"
               disabled={saving}
-              onClick={() => setEditor(null)}
+              onClick={closePromptEditor}
               type="button"
             >
               Close
@@ -1967,7 +2312,7 @@ function PromptExamples({
             <button
               className="ghost-button"
               disabled={saving}
-              onClick={() => setEditor(null)}
+              onClick={closePromptEditor}
               type="button"
             >
               Cancel
@@ -1982,57 +2327,58 @@ function PromptExamples({
       {notice ? <div className="form-notice">{notice}</div> : null}
 
       <div className="prompt-list">
-        {!session ? (
-          <p className="empty-state">Select a session to view prompts.</p>
+        {!promptsLoaded ? (
+          <p className="empty-state">Loading prompt examples...</p>
         ) : null}
-        {session && prompts.length === 0 ? (
+        {promptsLoaded && prompts.length === 0 ? (
           <p className="empty-state">No prompt examples configured.</p>
         ) : null}
-        {prompts.map((prompt) => (
-          <article className="prompt-item" key={prompt.id}>
-            <div className="prompt-title-row">
-              <div>
-                <h3>{prompt.title}</h3>
-                <span className="prompt-id">{prompt.id}</span>
+        {promptsLoaded &&
+          prompts.map((prompt) => (
+            <article className="prompt-item" key={prompt.id}>
+              <div className="prompt-title-row">
+                <div>
+                  <h3>{prompt.title}</h3>
+                  <span className="prompt-id">{prompt.id}</span>
+                </div>
               </div>
-            </div>
-            <pre>{prompt.text || "(empty prompt)"}</pre>
-            <div className="prompt-actions">
-              <button
-                disabled={copyingPromptId === prompt.id}
-                onClick={() => void handleCopyPrompt(prompt)}
-                type="button"
-              >
-                {copyingPromptId === prompt.id ? "Copying" : "Copy"}
-              </button>
-              <button
-                disabled={!running}
-                onClick={() => onTerminalInput(prompt.text)}
-                type="button"
-              >
-                Insert
-              </button>
-              <button
-                disabled={!running}
-                onClick={() => onTerminalInput(`${prompt.text}\r`)}
-                type="button"
-              >
-                Send
-              </button>
-              <button onClick={() => openEditEditor(prompt)} type="button">
-                Edit
-              </button>
-              <button
-                className="danger-button"
-                disabled={deletingPromptId === prompt.id}
-                onClick={() => void handleDeletePrompt(prompt)}
-                type="button"
-              >
-                {deletingPromptId === prompt.id ? "Deleting" : "Delete"}
-              </button>
-            </div>
-          </article>
-        ))}
+              <pre>{prompt.text || "(empty prompt)"}</pre>
+              <div className="prompt-actions">
+                <button
+                  disabled={copyingPromptId === prompt.id}
+                  onClick={() => void handleCopyPrompt(prompt)}
+                  type="button"
+                >
+                  {copyingPromptId === prompt.id ? "Copying" : "Copy"}
+                </button>
+                <button
+                  disabled={!running}
+                  onClick={() => onTerminalInput(prompt.text)}
+                  type="button"
+                >
+                  Insert
+                </button>
+                <button
+                  disabled={!running}
+                  onClick={() => onTerminalInput(`${prompt.text}\r`)}
+                  type="button"
+                >
+                  Send
+                </button>
+                <button onClick={() => openEditEditor(prompt)} type="button">
+                  Edit
+                </button>
+                <button
+                  className="danger-button"
+                  disabled={deletingPromptId === prompt.id}
+                  onClick={() => void handleDeletePrompt(prompt)}
+                  type="button"
+                >
+                  {deletingPromptId === prompt.id ? "Deleting" : "Delete"}
+                </button>
+              </div>
+            </article>
+          ))}
       </div>
     </aside>
   );

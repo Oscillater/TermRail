@@ -21,7 +21,7 @@ body {
   margin: 0;
   height: 100%;
   min-width: 320px;
-  overflow: hidden;
+  overflow: auto;
 }
 
 #root {
@@ -31,7 +31,9 @@ body {
 
 html {
   height: 100%;
-  overflow: hidden;
+  overflow: auto;
+  text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
 }
 
 button {
@@ -41,14 +43,12 @@ button {
 
 .app-shell {
   height: 100vh;
-  min-height: 0;
+  min-width: 1040px;
+  min-height: 620px;
   display: grid;
-  grid-template-columns: minmax(260px, 320px) minmax(360px, 1fr) minmax(
-      280px,
-      340px
-    );
+  grid-template-columns: 280px minmax(440px, 1fr) minmax(280px, 340px);
   background:
-    linear-gradient(90deg, #f9fafb 0, #f9fafb 320px, transparent 320px), #eef1f4;
+    linear-gradient(90deg, #f9fafb 0, #f9fafb 280px, transparent 280px), #eef1f4;
   overflow: hidden;
 }
 
@@ -91,93 +91,156 @@ button {
   gap: 8px;
 }
 
-.notification-row {
+.activity-box {
   display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  flex: 0 0 132px;
+  flex-direction: column;
+  gap: 7px;
+  height: 132px;
+  min-height: 132px;
+  overflow: hidden;
   border: 1px solid #dce1e7;
   border-radius: 8px;
   padding: 9px 10px;
   background: #ffffff;
 }
 
-.notification-toggle {
-  position: relative;
+.activity-header {
   display: flex;
-  min-width: 0;
   align-items: center;
-  gap: 8px;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.activity-title {
   color: #26313b;
   font-size: 12px;
   font-weight: 700;
   line-height: 1.2;
-  cursor: pointer;
 }
 
-.notification-toggle input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-}
-
-.notification-toggle input:disabled + .toggle-track {
-  opacity: 0.45;
-}
-
-.notification-toggle:has(input:disabled) {
-  cursor: not-allowed;
-  opacity: 0.7;
-}
-
-.toggle-track {
-  position: relative;
-  flex: 0 0 auto;
-  width: 34px;
-  height: 18px;
-  border: 1px solid #b9c1ca;
-  border-radius: 999px;
-  background: #eef1f4;
-  transition:
-    background 140ms ease,
-    border-color 140ms ease;
-}
-
-.toggle-track span {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: #68727d;
-  transition:
-    background 140ms ease,
-    transform 140ms ease;
-}
-
-.notification-toggle input:checked + .toggle-track {
-  border-color: #2f7568;
-  background: #dcefe8;
-}
-
-.notification-toggle input:checked + .toggle-track span {
-  background: #2f7568;
-  transform: translateX(16px);
-}
-
-.notification-toggle input:focus-visible + .toggle-track {
-  outline: 2px solid #2f7568;
-  outline-offset: 2px;
-}
-
-.notification-state {
+.activity-count {
   flex: 0 0 auto;
   color: #69727d;
   font-size: 12px;
   font-weight: 700;
+}
+
+.activity-list {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 5px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+
+.activity-item {
+  display: flex;
+  flex: 0 0 auto;
+  width: 100%;
+  min-height: 34px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 6px 7px;
+  background: #f6f8f8;
+  color: #35404a;
+  font-size: 12px;
+  line-height: 1.25;
+  text-align: left;
+}
+
+.activity-item.working {
+  background: #f8faf9;
+  color: #59646f;
+}
+
+.activity-item.running {
+  background: #f8faf9;
+  color: #59646f;
+}
+
+.activity-item.quiet {
+  border-color: #cbd8d5;
+  background: #edf4f2;
+  color: #243f3a;
+}
+
+.activity-item.stopped {
+  border-color: #d9dee5;
+  background: #f1f3f5;
+  color: #39434d;
+}
+
+.activity-item:hover {
+  background: #eef3f2;
+}
+
+.activity-item-main {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.activity-item-name {
+  color: inherit;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.activity-item-detail {
+  color: #69727d;
+  font-size: 11px;
+}
+
+.activity-state {
+  flex: 0 0 auto;
+  min-width: 56px;
+  border-radius: 999px;
+  padding: 2px 6px;
+  background: #e6eaee;
+  color: #4f5c67;
+  font-size: 11px;
+  font-weight: 800;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.activity-state.quiet {
+  background: #dcefe8;
+  color: #176148;
+}
+
+.activity-state.working {
+  background: transparent;
+  color: #69727d;
+}
+
+.activity-state.running {
+  background: transparent;
+  color: #69727d;
+}
+
+.activity-state.stopped {
+  background: #e6eaee;
+  color: #4f5c67;
+}
+
+.activity-empty {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  margin: 0;
+  color: #69727d;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .eyebrow {
@@ -485,13 +548,18 @@ h3 {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  font-size: 13px;
+  line-height: 1.35;
 }
 
 .session-item {
+  flex: 0 0 auto;
   overflow: hidden;
   border: 1px solid #dce1e7;
   border-radius: 8px;
   background: #ffffff;
+  font-size: 13px;
+  line-height: 1.35;
 }
 
 .session-item.selected {
@@ -502,9 +570,11 @@ h3 {
 .session-select {
   display: block;
   width: 100%;
-  padding: 12px;
+  padding: 9px 10px;
   background: transparent;
   color: inherit;
+  font-size: 13px;
+  line-height: 1.35;
   text-align: left;
   cursor: pointer;
 }
@@ -515,48 +585,81 @@ h3 {
 
 .session-title-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
 
 .session-name {
+  flex: 1 1 auto;
   min-width: 0;
   color: #15191e;
+  font-size: 14px;
   font-weight: 700;
   line-height: 1.35;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  overflow-wrap: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-heading {
   display: flex;
+  flex: 1 1 auto;
   min-width: 0;
-  align-items: flex-start;
+  align-items: center;
   gap: 7px;
+  overflow: hidden;
 }
 
-.unread-badge {
+.activity-badge {
   flex: 0 0 auto;
-  min-width: 22px;
-  max-width: 40px;
+  min-width: 56px;
+  max-width: 56px;
+  border: 1px solid #cbd8d5;
   border-radius: 999px;
   padding: 2px 6px;
-  background: #b43d32;
-  color: #ffffff;
+  background: #f8faf9;
+  color: #5d6873;
   font-size: 11px;
   font-weight: 800;
   line-height: 1.35;
+  overflow: hidden;
   text-align: center;
+  white-space: nowrap;
+}
+
+.activity-badge.empty {
+  display: none;
+}
+
+.activity-badge.quiet {
+  background: #edf4f2;
+  color: #2f6258;
+}
+
+.activity-badge.running,
+.activity-badge.working {
+  background: #f8faf9;
+  color: #5d6873;
+}
+
+.activity-badge.stopped {
+  background: #f1f3f5;
+  color: #4f5c67;
 }
 
 .session-meta,
 .session-command {
   display: block;
-  margin-top: 7px;
+  margin-top: 4px;
   color: #606b76;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.35;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  overflow-wrap: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-command {
@@ -567,10 +670,13 @@ h3 {
 
 .status-pill {
   flex: 0 0 auto;
+  min-width: 64px;
   border-radius: 999px;
   padding: 3px 8px;
   font-size: 11px;
   font-weight: 700;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .status-pill.run {
@@ -586,8 +692,16 @@ h3 {
 .session-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  padding: 0 12px 12px;
+  gap: 6px;
+  padding: 0 10px 10px;
+  font-size: 13px;
+}
+
+.session-actions button {
+  min-width: 0;
+  min-height: 28px;
+  font-size: 12px;
+  line-height: 1;
 }
 
 .terminal-panel {
@@ -701,6 +815,7 @@ h3 {
 }
 
 .prompt-item {
+  flex: 0 0 auto;
   border: 1px solid #dce1e7;
   border-radius: 8px;
   padding: 12px;
@@ -765,35 +880,56 @@ h3 {
 
 @media (max-width: 980px) {
   .app-shell {
-    height: 100vh;
-    grid-template-columns: 1fr;
-    grid-template-rows: minmax(180px, 260px) minmax(300px, 1fr) minmax(
-        160px,
-        240px
-      );
-  }
-
-  .session-panel,
-  .prompt-panel,
-  .terminal-panel {
-    height: auto;
-  }
-
-  .session-panel,
-  .prompt-panel {
-    border: 0;
-    border-bottom: 1px solid #d9dee5;
-  }
-
-  .prompt-panel {
-    border-top: 1px solid #d9dee5;
-  }
-
-  .session-list {
-    max-height: 360px;
+    min-width: 980px;
+    grid-template-columns: 260px minmax(420px, 1fr) 300px;
   }
 
   .terminal-header {
     align-items: flex-start;
+  }
+}
+
+@media (max-width: 520px) {
+  .session-panel,
+  .prompt-panel,
+  .terminal-panel {
+    padding: 12px;
+  }
+
+  .session-select {
+    padding: 10px;
+  }
+
+  .session-title-row {
+    gap: 6px;
+  }
+
+  .session-heading {
+    gap: 6px;
+  }
+
+  .session-name {
+    font-size: 13px;
+  }
+
+  .activity-badge {
+    min-width: 52px;
+    max-width: 52px;
+    font-size: 10px;
+  }
+
+  .status-pill {
+    min-width: 58px;
+    font-size: 10px;
+  }
+
+  .session-actions {
+    gap: 6px;
+    padding: 0 10px 10px;
+  }
+
+  .session-actions button {
+    min-height: 28px;
+    font-size: 12px;
   }
 }

@@ -30,7 +30,7 @@ type SessionManagerEvents = {
   status: [RuntimeStatus];
 };
 
-const maxBufferChars = 200_000;
+const maxBufferChars = 2_000_000;
 const defaultTerminalSize = { cols: 120, rows: 36 };
 const terminalSizeLimits = {
   minCols: 10,
