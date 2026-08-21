@@ -27,10 +27,55 @@ async function waitForHealth() {
   throw new Error("server did not become ready");
 }
 
+function runNoBufferSubscriptionCheck() {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error("timeout waiting for no-buffer subscription"));
+    }, 3000);
+
+    ws.on("open", () => {
+      ws.send(
+        JSON.stringify({
+          type: "subscribe",
+          sessionId,
+          includeBuffer: false,
+        }),
+      );
+    });
+
+    ws.on("message", (data) => {
+      const message = JSON.parse(data.toString());
+      if (message.type !== "subscribed") {
+        return;
+      }
+
+      clearTimeout(timeout);
+      ws.close();
+      if (message.buffer !== "") {
+        reject(
+          new Error(
+            `no-buffer subscription returned ${message.buffer.length} chars`,
+          ),
+        );
+        return;
+      }
+      resolve();
+    });
+
+    ws.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+}
+
 function runWebSocketCheck() {
   return new Promise((resolve, reject) => {
     let output = "";
     let completed = false;
+    let sawOutputTimestamp = false;
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
     const timeout = setTimeout(() => {
       ws.close();
@@ -65,6 +110,18 @@ function runWebSocketCheck() {
     ws.on("message", (data) => {
       const message = JSON.parse(data.toString());
       if (message.type === "terminal.output") {
+        if (
+          typeof message.at !== "string" ||
+          Number.isNaN(Date.parse(message.at))
+        ) {
+          clearTimeout(timeout);
+          ws.close();
+          reject(
+            new Error("terminal output did not include a valid timestamp"),
+          );
+          return;
+        }
+        sawOutputTimestamp = true;
         output += message.data;
       }
       if (
@@ -78,7 +135,7 @@ function runWebSocketCheck() {
     });
 
     ws.on("close", () => {
-      if (completed && /v\d+\.\d+\.\d+/.test(output)) {
+      if (completed && sawOutputTimestamp && /v\d+\.\d+\.\d+/.test(output)) {
         resolve(output.trim());
         return;
       }
@@ -123,6 +180,7 @@ async function main() {
       throw new Error(`list sessions failed: ${response.status}`);
     }
     const output = await runWebSocketCheck();
+    await runNoBufferSubscriptionCheck();
     console.log(`smoke ok: ${sessionId} output ${JSON.stringify(output)}`);
   } finally {
     server.kill();

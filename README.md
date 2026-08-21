@@ -1,108 +1,173 @@
-# Codex Switchboard
+# TermRail
 
-Minimal local Web tool for switching between configured terminal sessions.
+Local browser UI for launching, watching, and switching between configured terminal sessions.
 
-The `server/` workspace exposes the configured session API and PTY WebSocket, and the `web/` workspace provides a Vite/React terminal UI for selecting, starting, stopping, and interacting with sessions.
+TermRail keeps project terminals in one local dashboard. Define each session with a working directory and command, start it through a PTY, and interact with it from the browser. It works well for long-running Codex, Claude Code, shell, and development server sessions.
 
-## Setup
+## Highlights
+
+- Start, stop, and switch between named terminal sessions.
+- Browser terminal powered by xterm.js and node-pty.
+- Live output streaming over WebSocket.
+- Activity indicators for sessions producing output in the background.
+- Shared prompt library with copy, insert, and send actions.
+- Local folder picker for session working directories.
+- Large terminal scrollback and server-side buffer retention during runtime.
+- Optional token auth for the HTTP API and WebSocket.
+- Windows startup script for one-command local launch.
+
+## Status
+
+TermRail is early alpha software for local developer workstations. The current focus is a stable Windows workflow with PowerShell, Node.js, npm, and browser-based terminal switching. macOS and Linux use the same Node/PTY stack.
+
+## Requirements
+
+- Windows, macOS, or Linux.
+- Node.js `18.x`, `20.x`, or `22+`.
+- npm.
+- On Windows, Visual Studio C++ build tools may be required when the `node-pty` prebuilt package is unavailable.
+
+## Quick Start
+
+### Windows
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\start.ps1
+```
+
+The script checks for Node.js and npm, installs dependencies when `node_modules/` is missing, starts the backend and Vite UI, and opens `http://127.0.0.1:5173`.
+
+### Manual Start
 
 ```powershell
 npm install
+npm start
 ```
 
-## Run
+Development mode runs two local services:
 
-```powershell
-npm run dev:server
-```
+| Service                   | URL                     |
+| ------------------------- | ----------------------- |
+| UI                        | `http://127.0.0.1:5173` |
+| Backend API and WebSocket | `http://127.0.0.1:8787` |
 
-Or start both the backend and the frontend:
+Vite proxies `/api` and `/ws` to the backend.
 
-```powershell
-npm run dev
-```
+## Create A Session
 
-The backend defaults to `http://127.0.0.1:8787`.
-
-## Verify
-
-```powershell
-npm run check
-npm run smoke --workspace server
-```
-
-The smoke test starts a temporary backend on `127.0.0.1:8797`, loads `data/config.example.json`, subscribes over WebSocket, starts the safe `node -v` session, and verifies PTY output.
-
-Optional environment variables:
-
-- `HOST`, default `127.0.0.1`
-- `PORT`, default `8787`
-- `AUTH_TOKEN`, optional token required by HTTP API and WebSocket when set
-- `CONFIG_PATH`, optional override for `data/config.json`
-- `SWITCHBOARD_SHELL`, optional shell override for PTY commands
-- `VITE_AUTH_TOKEN`, optional frontend token; set it to the same value as `AUTH_TOKEN` when using the Vite dev UI with auth enabled
-
-## Config
-
-Runtime config is stored in `data/config.json`. If the file is missing, the server creates:
+Open the UI, choose **Add**, and configure a session with an id, display name, working directory, and command.
 
 ```json
 {
-  "sessions": []
-}
-```
-
-You can copy `data/config.example.json` to `data/config.json` for safe PTY smoke tests. Relative `cwd` values are resolved from the repository root.
-
-## HTTP API
-
-If `AUTH_TOKEN` is set, pass either `Authorization: Bearer <token>`, `x-auth-token: <token>`, or `?token=<token>`.
-
-- `GET /api/sessions`
-- `POST /api/sessions`
-- `PATCH /api/sessions/:id`
-- `PUT /api/sessions/:id`
-- `DELETE /api/sessions/:id`
-- `POST /api/sessions/:id/start`
-- `POST /api/sessions/:id/stop`
-- `GET /api/sessions/:id/status`
-- `GET /api/status`
-- `GET /api/filesystem/roots`
-- `GET /api/filesystem/directories?path=<folder>`
-
-Create or update body:
-
-```json
-{
-  "id": "test-node-version",
-  "name": "Node Version Test",
-  "cwd": ".",
-  "command": "node -v",
+  "id": "my-project-codex",
+  "name": "My Project Codex",
+  "cwd": "D:\\Project\\my-project",
+  "command": "codex resume",
   "prompts": []
 }
 ```
 
-There is no arbitrary command execution endpoint. Start only runs the `command` stored in the session config.
-
-The start endpoint may receive the browser terminal size so TUI programs can render at the correct dimensions from the first frame:
+More examples:
 
 ```json
 {
-  "cols": 120,
-  "rows": 36
+  "id": "my-project-claude",
+  "name": "My Project Claude",
+  "cwd": "D:\\Project\\my-project",
+  "command": "claude",
+  "prompts": []
 }
 ```
 
-The filesystem endpoints only list local folders for choosing a session `cwd`; they do not read file contents or run commands.
+```json
+{
+  "id": "powershell",
+  "name": "PowerShell",
+  "cwd": ".",
+  "command": "powershell",
+  "prompts": []
+}
+```
 
-## WebSocket
+Session `cwd` values may be absolute or relative to this repository root.
 
-Connect to `ws://127.0.0.1:8787/ws`. If `AUTH_TOKEN` is set, use `ws://127.0.0.1:8787/ws?token=<token>`.
+## Configuration
+
+Runtime config lives at `data/config.json`. Git ignores this file because it can contain private local paths and commands.
+
+An empty config is created automatically:
+
+```json
+{
+  "prompts": [],
+  "sessions": []
+}
+```
+
+`data/config.example.json` is safe to commit and is used by the smoke test.
+
+### Session Fields
+
+| Field     | Description                                                                                 |
+| --------- | ------------------------------------------------------------------------------------------- |
+| `id`      | Stable session id used by the API and WebSocket.                                            |
+| `name`    | Display name shown in the UI.                                                               |
+| `cwd`     | Working directory for the PTY command.                                                      |
+| `command` | Command launched when the session starts.                                                   |
+| `prompts` | Legacy per-session prompt array; the current UI stores the prompt library at the top level. |
+
+## Environment
+
+| Variable            | Default                     | Description                                   |
+| ------------------- | --------------------------- | --------------------------------------------- |
+| `HOST`              | `127.0.0.1`                 | Backend bind host.                            |
+| `PORT`              | `8787`                      | Backend port.                                 |
+| `AUTH_TOKEN`        | empty                       | Token accepted by the HTTP API and WebSocket. |
+| `CONFIG_PATH`       | `data/config.json`          | Runtime config path override.                 |
+| `SWITCHBOARD_SHELL` | `powershell.exe` on Windows | PTY shell override used by the server.        |
+| `VITE_AUTH_TOKEN`   | empty                       | Frontend token for manual Vite startup.       |
+
+When using `start.ps1`, setting `AUTH_TOKEN` is enough; the script mirrors it into `VITE_AUTH_TOKEN` before starting the UI.
+
+## Security Model
+
+TermRail binds to `127.0.0.1` by default and is designed for local use.
+
+- Saved session configs define the command execution boundary.
+- The start endpoint launches the stored `command` for a known session id.
+- Directory endpoints return folder listings for selecting a session `cwd`.
+- Runtime config stays in `data/config.json`, which is ignored by Git.
+- Remote access belongs behind Tailscale, another private VPN, or a trusted LAN.
+- Set `AUTH_TOKEN` when binding outside localhost.
+
+## API
+
+When `AUTH_TOKEN` is set, authenticate with one of these options:
+
+- `Authorization: Bearer <token>`
+- `x-auth-token: <token>`
+- `?token=<token>`
+
+Common HTTP endpoints:
+
+| Method   | Path                                        |
+| -------- | ------------------------------------------- |
+| `GET`    | `/api/sessions`                             |
+| `POST`   | `/api/sessions`                             |
+| `PATCH`  | `/api/sessions/:id`                         |
+| `DELETE` | `/api/sessions/:id`                         |
+| `POST`   | `/api/sessions/:id/start`                   |
+| `POST`   | `/api/sessions/:id/stop`                    |
+| `GET`    | `/api/status`                               |
+| `GET`    | `/api/filesystem/roots`                     |
+| `GET`    | `/api/filesystem/directories?path=<folder>` |
+
+WebSocket clients connect to `/ws`.
 
 Client messages:
 
 ```json
-{ "type": "subscribe", "sessionId": "test-node-version" }
+{ "type": "subscribe", "sessionId": "test-node-version", "includeBuffer": true }
 ```
 
 ```json
@@ -117,10 +182,37 @@ Client messages:
 { "type": "resize", "sessionId": "test-node-version", "cols": 120, "rows": 32 }
 ```
 
-Server messages include:
+Set `includeBuffer` to `false` for background activity monitors that only need future output.
 
-- `subscribed`
-- `unsubscribed`
-- `terminal.output`
-- `session.status`
-- `error`
+Server messages include `subscribed`, `unsubscribed`, `terminal.output`, `session.status`, and `error`. `terminal.output` includes an ISO timestamp in `at`.
+
+## Development
+
+```powershell
+npm run dev
+```
+
+Useful checks:
+
+```powershell
+npm run check
+npm run format:check
+npm run smoke --workspace server
+```
+
+The smoke test starts a temporary backend on `127.0.0.1:8797`, loads `data/config.example.json`, subscribes over WebSocket, starts the safe `node -v` session, and verifies PTY output.
+
+## Project Layout
+
+```text
+server/   Express API, WebSocket server, PTY session manager
+web/      Vite, React, xterm.js terminal UI
+data/     Example config and local runtime config location
+```
+
+## Troubleshooting
+
+- UI opens and sessions fail to load: confirm the backend is running on `127.0.0.1:8787`.
+- `node-pty` install errors on Windows: install Visual Studio C++ build tools or use a supported Node.js version.
+- Auth-enabled manual startup: set both `AUTH_TOKEN` and `VITE_AUTH_TOKEN` before running `npm start`.
+- TUI size mismatch after startup: use the **Fit** button in the terminal header.

@@ -1,5 +1,5 @@
 {
-  "name": "@codex-switchboard/web",
+  "name": "@termrail/web",
   "version": "0.1.0",
   "private": true,
   "type": "module",

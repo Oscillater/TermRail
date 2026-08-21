@@ -3,9 +3,9 @@
   "sessions": [
     {
       "id": "test-powershell-echo",
-      "name": "PowerShell Echo Test",
+      "name": "PowerShell Echo",
       "cwd": ".",
-      "command": "Write-Output \"hello from Codex Switchboard\"",
+      "command": "Write-Output \"hello from TermRail\"",
       "prompts": []
     },
     {

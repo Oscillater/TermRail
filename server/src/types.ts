@@ -33,4 +33,5 @@ export type RuntimeStatus = {
 export type TerminalOutputEvent = {
   sessionId: string;
   data: string;
+  at: string;
 };

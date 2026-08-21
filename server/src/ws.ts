@@ -6,7 +6,7 @@ import { isAuthorized } from "./auth.js";
 import type { SessionManager } from "./sessionManager.js";
 
 type ClientMessage =
-  | { type: "subscribe"; sessionId: string }
+  | { type: "subscribe"; sessionId: string; includeBuffer: boolean }
   | { type: "unsubscribe"; sessionId: string }
   | { type: "input"; sessionId: string; data: string }
   | { type: "resize"; sessionId: string; cols: number; rows: number };
@@ -43,8 +43,23 @@ function parseClientMessage(raw: WebSocket.RawData): ClientMessage {
 
   switch (parsed.type) {
     case "subscribe":
+      if (
+        parsed.includeBuffer !== undefined &&
+        typeof parsed.includeBuffer !== "boolean"
+      ) {
+        throw new HttpError(
+          400,
+          "INVALID_WS_MESSAGE",
+          "subscribe includeBuffer must be a boolean",
+        );
+      }
+      return {
+        type: "subscribe",
+        sessionId: parsed.sessionId,
+        includeBuffer: parsed.includeBuffer ?? true,
+      };
     case "unsubscribe":
-      return { type: parsed.type, sessionId: parsed.sessionId };
+      return { type: "unsubscribe", sessionId: parsed.sessionId };
     case "input":
       if (typeof parsed.data !== "string") {
         throw new HttpError(
@@ -144,7 +159,11 @@ export function attachWebSocketServer(
     }
   }
 
-  function subscribe(ws: WebSocket, sessionId: string): void {
+  function subscribe(
+    ws: WebSocket,
+    sessionId: string,
+    includeBuffer: boolean,
+  ): void {
     ensureSession(sessionId);
 
     let clients = subscriptions.get(sessionId);
@@ -165,7 +184,7 @@ export function attachWebSocketServer(
       type: "subscribed",
       sessionId,
       status: sessionManager.getStatus(sessionId),
-      buffer: sessionManager.getBuffer(sessionId),
+      buffer: includeBuffer ? sessionManager.getBuffer(sessionId) : "",
     });
   }
 
@@ -191,8 +210,8 @@ export function attachWebSocketServer(
     subscriptions.get(sessionId)?.forEach((ws) => send(ws, payload));
   }
 
-  sessionManager.on("output", ({ sessionId, data }) => {
-    broadcast(sessionId, { type: "terminal.output", sessionId, data });
+  sessionManager.on("output", ({ sessionId, data, at }) => {
+    broadcast(sessionId, { type: "terminal.output", sessionId, data, at });
   });
 
   sessionManager.on("status", (status) => {
@@ -211,7 +230,7 @@ export function attachWebSocketServer(
 
         switch (message.type) {
           case "subscribe":
-            subscribe(ws, message.sessionId);
+            subscribe(ws, message.sessionId, message.includeBuffer);
             break;
           case "unsubscribe":
             unsubscribe(ws, message.sessionId);

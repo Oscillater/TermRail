@@ -765,7 +765,10 @@ h3 {
 
 .terminal-frame {
   flex: 1 1 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 22px;
   min-height: 0;
+  position: relative;
   overflow: hidden;
   border: 1px solid #252a30;
   border-radius: 8px;
@@ -785,6 +788,7 @@ h3 {
   width: 100%;
   height: 100%;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
   padding: 10px;
 }
@@ -795,8 +799,64 @@ h3 {
 }
 
 .terminal-host .xterm-viewport {
-  overflow-y: auto;
+  overflow-y: scroll;
   overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.terminal-host .xterm-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.terminal-scroll-rail {
+  display: flex;
+  min-height: 0;
+  justify-content: center;
+  border-left: 1px solid #252a30;
+  padding: 8px 0;
+  background: #15181c;
+  cursor: default;
+}
+
+.terminal-scroll-control {
+  position: relative;
+  width: 10px;
+  height: 100%;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.terminal-scroll-control:hover {
+  background: #20262d;
+}
+
+.terminal-scroll-control.disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.terminal-scroll-thumb {
+  position: absolute;
+  left: 2px;
+  width: 6px;
+  height: 34px;
+  border: 0;
+  border-radius: 999px;
+  background: #68727d;
+}
+
+.terminal-scroll-control:hover .terminal-scroll-thumb {
+  background: #9aa5b1;
+}
+
+.terminal-scroll-control.disabled .terminal-scroll-thumb {
+  background: #3b444f;
 }
 
 .terminal-footer {

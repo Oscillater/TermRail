@@ -220,12 +220,13 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       if (!activeRecord) {
         return;
       }
+      const outputAt = now();
       activeRecord.buffer += data;
       if (activeRecord.buffer.length > maxBufferChars) {
         activeRecord.buffer = activeRecord.buffer.slice(-maxBufferChars);
       }
-      activeRecord.lastOutputAt = now();
-      this.emit("output", { sessionId: session.id, data });
+      activeRecord.lastOutputAt = outputAt;
+      this.emit("output", { sessionId: session.id, data, at: outputAt });
     });
 
     terminal.onExit(({ exitCode }) => {

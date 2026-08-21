@@ -1,4 +1,6 @@
 import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type FormEvent,
   useCallback,
   useEffect,
@@ -55,6 +57,10 @@ type StatusResponse = {
   status: RuntimeStatus;
 };
 
+type StatusesResponse = {
+  statuses: Record<string, RuntimeStatus>;
+};
+
 type TerminalInputRequest = {
   id: number;
   data: string;
@@ -63,6 +69,11 @@ type TerminalInputRequest = {
 type TerminalSize = {
   cols: number;
   rows: number;
+};
+
+type TerminalScrollState = {
+  viewportY: number;
+  baseY: number;
 };
 
 type OutputActivityState = "running" | "working" | "quiet" | "stopped";
@@ -97,7 +108,7 @@ type WsMessage =
       buffer: string;
     }
   | { type: "unsubscribed"; sessionId: string }
-  | { type: "terminal.output"; sessionId: string; data: string }
+  | { type: "terminal.output"; sessionId: string; data: string; at?: string }
   | { type: "session.status"; sessionId: string; status: RuntimeStatus }
   | {
       type: "error";
@@ -112,6 +123,7 @@ const terminalSizeLimits = {
   maxRows: 200,
 };
 const outputQuietDelayMs = 3_000;
+const statusRefreshIntervalMs = 2_000;
 
 function makeLocalId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random()
@@ -168,6 +180,21 @@ function clampTerminalSize(cols: number, rows: number) {
       terminalSizeLimits.minRows,
       terminalSizeLimits.maxRows,
     ),
+  };
+}
+
+function readTerminalScrollState(
+  terminal: Terminal | null,
+): TerminalScrollState {
+  if (!terminal) {
+    return { viewportY: 0, baseY: 0 };
+  }
+
+  const buffer = terminal.buffer.active;
+  const baseY = Math.max(0, buffer.baseY);
+  return {
+    baseY,
+    viewportY: clampValue(buffer.viewportY, 0, baseY),
   };
 }
 
@@ -260,6 +287,90 @@ function formatDate(value: string | null): string {
   }).format(new Date(value));
 }
 
+function timestampFromIso(value: string | null): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function latestIso(left: string | null, right: string | null): string | null {
+  const leftTimestamp = timestampFromIso(left);
+  const rightTimestamp = timestampFromIso(right);
+
+  if (leftTimestamp === null) {
+    return right;
+  }
+  if (rightTimestamp === null) {
+    return left;
+  }
+
+  return leftTimestamp > rightTimestamp ? left : right;
+}
+
+function mergeRuntimeStatus(
+  current: RuntimeStatus | undefined,
+  incoming: RuntimeStatus,
+): RuntimeStatus {
+  if (!current || current.startedAt !== incoming.startedAt) {
+    return incoming;
+  }
+
+  const merged = {
+    ...incoming,
+    lastOutputAt: latestIso(current.lastOutputAt, incoming.lastOutputAt),
+  };
+
+  const currentStoppedAt = timestampFromIso(current.stoppedAt);
+  const incomingLastOutputAt = timestampFromIso(incoming.lastOutputAt);
+  if (
+    current.state === "stopped" &&
+    incoming.state === "running" &&
+    currentStoppedAt !== null &&
+    (incomingLastOutputAt === null || currentStoppedAt >= incomingLastOutputAt)
+  ) {
+    return {
+      ...merged,
+      state: "stopped",
+      stoppedAt: current.stoppedAt,
+      exitCode: current.exitCode,
+      pid: null,
+    };
+  }
+
+  return merged;
+}
+
+function activityFromStatus(
+  status: RuntimeStatus | undefined,
+  acknowledgedAt: number,
+  now: number,
+): OutputActivity | undefined {
+  if (!status) {
+    return undefined;
+  }
+
+  if (status.state === "stopped") {
+    const stoppedAt = timestampFromIso(status.stoppedAt);
+    if (stoppedAt !== null && stoppedAt > acknowledgedAt) {
+      return { state: "stopped", updatedAt: stoppedAt };
+    }
+    return undefined;
+  }
+
+  const lastOutputAt = timestampFromIso(status.lastOutputAt);
+  if (lastOutputAt === null || lastOutputAt <= acknowledgedAt) {
+    return undefined;
+  }
+
+  return {
+    state: now - lastOutputAt >= outputQuietDelayMs ? "quiet" : "working",
+    updatedAt: lastOutputAt,
+  };
+}
+
 function statusLabel(status: RuntimeStatus | undefined): string {
   return status?.state === "running" ? "Running" : "Stopped";
 }
@@ -311,9 +422,10 @@ function AppShell() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null,
   );
-  const [outputActivities, setOutputActivities] = useState<OutputActivities>(
-    {},
-  );
+  const [activityAcknowledgedAt, setActivityAcknowledgedAt] = useState<
+    Record<string, number>
+  >({});
+  const [activityNow, setActivityNow] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
   const [actionSessionId, setActionSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -322,11 +434,7 @@ function AppShell() {
   const [terminalSize, setTerminalSize] = useState<TerminalSize | null>(null);
   const sessionsRef = useRef<SessionConfig[]>([]);
   const statusesRef = useRef<Record<string, RuntimeStatus>>({});
-  const outputQuietTimersRef = useRef<Record<string, number>>({});
-  const outputActivityStatesRef = useRef<Record<string, OutputActivityState>>(
-    {},
-  );
-  const outputLastAtRef = useRef<Record<string, number>>({});
+  const statusRefreshInFlightRef = useRef(false);
   const terminalInputRequestIdRef = useRef(0);
 
   const selectedSession = useMemo(
@@ -342,117 +450,50 @@ function AppShell() {
     [sessions],
   );
 
-  const updateStatus = useCallback((status: RuntimeStatus) => {
-    statusesRef.current = {
-      ...statusesRef.current,
-      [status.sessionId]: status,
-    };
-    setStatuses((current) => ({ ...current, [status.sessionId]: status }));
-  }, []);
-
-  const clearOutputTimer = useCallback((sessionId: string) => {
-    const timerId = outputQuietTimersRef.current[sessionId];
-    if (timerId !== undefined) {
-      window.clearTimeout(timerId);
-      delete outputQuietTimersRef.current[sessionId];
-    }
-  }, []);
-
-  const clearOutputActivity = useCallback(
-    (sessionId: string) => {
-      clearOutputTimer(sessionId);
-      delete outputActivityStatesRef.current[sessionId];
-      delete outputLastAtRef.current[sessionId];
-      setOutputActivities((current) => {
-        if (!current[sessionId]) {
-          return current;
-        }
-        const next = { ...current };
-        delete next[sessionId];
-        return next;
-      });
-    },
-    [clearOutputTimer],
-  );
-
-  const scheduleQuietActivity = useCallback(
-    (sessionId: string, lastOutputAt: number) => {
-      clearOutputTimer(sessionId);
-      outputQuietTimersRef.current[sessionId] = window.setTimeout(() => {
-        delete outputQuietTimersRef.current[sessionId];
-        if (outputLastAtRef.current[sessionId] !== lastOutputAt) {
-          return;
-        }
-        if (outputActivityStatesRef.current[sessionId] !== "working") {
-          return;
-        }
-        outputActivityStatesRef.current[sessionId] = "quiet";
-        setOutputActivities((current) => {
-          const activity = current[sessionId];
-          if (!activity || activity.state !== "working") {
-            return current;
-          }
-          return {
-            ...current,
-            [sessionId]: {
-              ...activity,
-              state: "quiet",
-              updatedAt: Date.now(),
-            },
-          };
-        });
-      }, outputQuietDelayMs);
-    },
-    [clearOutputTimer],
-  );
-
-  const markStoppedActivity = useCallback(
-    (sessionId: string) => {
-      clearOutputTimer(sessionId);
-      delete outputLastAtRef.current[sessionId];
-      if (outputActivityStatesRef.current[sessionId] === "stopped") {
-        return;
+  const outputActivities = useMemo(() => {
+    const next: OutputActivities = {};
+    sessions.forEach((session) => {
+      const activity = activityFromStatus(
+        statuses[session.id],
+        activityAcknowledgedAt[session.id] ?? 0,
+        activityNow,
+      );
+      if (activity) {
+        next[session.id] = activity;
       }
-      outputActivityStatesRef.current[sessionId] = "stopped";
-      setOutputActivities((current) => {
-        const activity = current[sessionId];
-        if (activity?.state === "stopped") {
-          return current;
-        }
-        return {
-          ...current,
-          [sessionId]: {
-            ...(activity ?? {}),
-            state: "stopped",
-            updatedAt: Date.now(),
-          },
-        };
-      });
-    },
-    [clearOutputTimer],
-  );
-
-  const markRunningActivity = useCallback((sessionId: string) => {
-    if (outputActivityStatesRef.current[sessionId] !== "stopped") {
-      return;
-    }
-    delete outputActivityStatesRef.current[sessionId];
-    setOutputActivities((current) => {
-      if (current[sessionId]?.state !== "stopped") {
-        return current;
-      }
-      const next = { ...current };
-      delete next[sessionId];
-      return next;
     });
+    return next;
+  }, [activityAcknowledgedAt, activityNow, sessions, statuses]);
+
+  const updateStatus = useCallback((status: RuntimeStatus) => {
+    setStatuses((current) => {
+      const mergedStatus = mergeRuntimeStatus(
+        current[status.sessionId],
+        status,
+      );
+      statusesRef.current = {
+        ...statusesRef.current,
+        [status.sessionId]: mergedStatus,
+      };
+      return { ...current, [status.sessionId]: mergedStatus };
+    });
+  }, []);
+
+  const acknowledgeActivity = useCallback((sessionId: string) => {
+    const acknowledgedAt = Date.now();
+    setActivityAcknowledgedAt((current) => ({
+      ...current,
+      [sessionId]: acknowledgedAt,
+    }));
+    setActivityNow(acknowledgedAt);
   }, []);
 
   const selectSession = useCallback(
     (sessionId: string) => {
       setSelectedSessionId(sessionId);
-      clearOutputActivity(sessionId);
+      acknowledgeActivity(sessionId);
     },
-    [clearOutputActivity],
+    [acknowledgeActivity],
   );
 
   const upsertSession = useCallback((session: SessionConfig) => {
@@ -485,6 +526,7 @@ function AppShell() {
       setSessions(data.sessions);
       statusesRef.current = data.statuses;
       setStatuses(data.statuses);
+      setActivityNow(Date.now());
       setSelectedSessionId((current) => {
         if (
           current &&
@@ -511,77 +553,115 @@ function AppShell() {
 
   useEffect(() => {
     if (selectedSessionId) {
-      clearOutputActivity(selectedSessionId);
+      acknowledgeActivity(selectedSessionId);
     }
-  }, [clearOutputActivity, selectedSessionId]);
+  }, [acknowledgeActivity, selectedSessionId]);
 
   useEffect(() => {
     sessionsRef.current = sessions;
     const sessionIds = new Set(sessions.map((session) => session.id));
-    setOutputActivities((current) => {
+    setActivityAcknowledgedAt((current) => {
       let changed = false;
-      const next: OutputActivities = {};
-      Object.entries(current).forEach(([sessionId, activity]) => {
+      const next: Record<string, number> = {};
+      Object.entries(current).forEach(([sessionId, acknowledgedAt]) => {
         if (sessionIds.has(sessionId)) {
-          next[sessionId] = activity;
+          next[sessionId] = acknowledgedAt;
         } else {
-          clearOutputTimer(sessionId);
-          delete outputActivityStatesRef.current[sessionId];
-          delete outputLastAtRef.current[sessionId];
           changed = true;
         }
       });
       return changed ? next : current;
     });
-  }, [clearOutputTimer, sessions]);
+  }, [sessions]);
 
   useEffect(() => {
+    const updateActivityNow = () => setActivityNow(Date.now());
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        updateActivityNow();
+      }
+    };
+    const timerId = window.setInterval(updateActivityNow, 1_000);
+
+    window.addEventListener("focus", updateActivityNow);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
     return () => {
-      Object.values(outputQuietTimersRef.current).forEach((timerId) => {
-        window.clearTimeout(timerId);
-      });
-      outputQuietTimersRef.current = {};
-      outputActivityStatesRef.current = {};
-      outputLastAtRef.current = {};
+      window.clearInterval(timerId);
+      window.removeEventListener("focus", updateActivityNow);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, []);
 
-  const handleSessionOutput = useCallback(
-    (sessionId: string) => {
+  const handleActivityOutput = useCallback(
+    (sessionId: string, outputAtIso?: string) => {
       if (!sessionsRef.current.some((session) => session.id === sessionId)) {
         return;
       }
 
-      const now = Date.now();
-      outputLastAtRef.current[sessionId] = now;
-      if (outputActivityStatesRef.current[sessionId] !== "working") {
-        outputActivityStatesRef.current[sessionId] = "working";
-        setOutputActivities((current) => ({
-          ...current,
-          [sessionId]: {
-            state: "working",
-            updatedAt: now,
-          },
-        }));
-      }
-      scheduleQuietActivity(sessionId, now);
+      const receivedAt = Date.now();
+      const outputAt = timestampFromIso(outputAtIso ?? null) ?? receivedAt;
+      const previousStatus =
+        statusesRef.current[sessionId] ?? defaultRuntimeStatus(sessionId);
+
+      updateStatus({
+        ...previousStatus,
+        sessionId,
+        state: "running",
+        stoppedAt: null,
+        exitCode: null,
+        lastOutputAt: new Date(outputAt).toISOString(),
+      });
+      setActivityNow(receivedAt);
     },
-    [scheduleQuietActivity],
+    [updateStatus],
   );
 
   const handleSessionStatus = useCallback(
     (status: RuntimeStatus) => {
-      const previousStatus = statusesRef.current[status.sessionId];
       updateStatus(status);
-      if (status.state === "running") {
-        markRunningActivity(status.sessionId);
-      }
-      if (previousStatus?.state === "running" && status.state === "stopped") {
-        markStoppedActivity(status.sessionId);
-      }
+      setActivityNow(Date.now());
     },
-    [markRunningActivity, markStoppedActivity, updateStatus],
+    [updateStatus],
   );
+
+  const refreshStatuses = useCallback(async () => {
+    if (statusRefreshInFlightRef.current || sessionsRef.current.length === 0) {
+      return;
+    }
+
+    statusRefreshInFlightRef.current = true;
+    try {
+      const data = await apiRequest<StatusesResponse>("/api/status");
+      Object.values(data.statuses).forEach(handleSessionStatus);
+      setActivityNow(Date.now());
+    } catch {
+      // The WebSocket is still the primary live channel; polling is best-effort.
+    } finally {
+      statusRefreshInFlightRef.current = false;
+    }
+  }, [handleSessionStatus]);
+
+  useEffect(() => {
+    const timerId = window.setInterval(() => {
+      void refreshStatuses();
+    }, statusRefreshIntervalMs);
+
+    const refreshWhenVisible = () => {
+      if (!document.hidden) {
+        void refreshStatuses();
+      }
+    };
+
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+
+    return () => {
+      window.clearInterval(timerId);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [refreshStatuses]);
 
   useEffect(() => {
     const sessionIds = JSON.parse(subscribedSessionIdsKey) as string[];
@@ -602,7 +682,13 @@ function AppShell() {
           return;
         }
         sessionIds.forEach((sessionId) => {
-          nextSocket.send(JSON.stringify({ type: "subscribe", sessionId }));
+          nextSocket.send(
+            JSON.stringify({
+              type: "subscribe",
+              sessionId,
+              includeBuffer: false,
+            }),
+          );
         });
       });
 
@@ -623,7 +709,7 @@ function AppShell() {
             handleSessionStatus(message.status);
             break;
           case "terminal.output":
-            handleSessionOutput(message.sessionId);
+            handleActivityOutput(message.sessionId, message.at);
             break;
           case "session.status":
             handleSessionStatus(message.status);
@@ -660,7 +746,7 @@ function AppShell() {
       }
       socket?.close();
     };
-  }, [handleSessionOutput, handleSessionStatus, subscribedSessionIdsKey]);
+  }, [handleActivityOutput, handleSessionStatus, subscribedSessionIdsKey]);
 
   const runAction = useCallback(
     async (sessionId: string, action: "start" | "stop") => {
@@ -746,11 +832,8 @@ function AppShell() {
         delete statusesRef.current[sessionId];
         return next;
       });
-      clearOutputTimer(sessionId);
-      delete outputActivityStatesRef.current[sessionId];
-      delete outputLastAtRef.current[sessionId];
-      setOutputActivities((current) => {
-        if (!current[sessionId]) {
+      setActivityAcknowledgedAt((current) => {
+        if (current[sessionId] === undefined) {
           return current;
         }
         const next = { ...current };
@@ -758,7 +841,7 @@ function AppShell() {
         return next;
       });
     },
-    [clearOutputTimer, sessions],
+    [sessions],
   );
 
   const updatePrompts = useCallback(async (nextPrompts: PromptExample[]) => {
@@ -801,7 +884,7 @@ function AppShell() {
         error={error}
         inputRequest={terminalInputRequest}
         onError={setError}
-        onOutput={handleSessionOutput}
+        onOutput={handleActivityOutput}
         onSize={setTerminalSize}
         onStatus={handleSessionStatus}
         session={selectedSession}
@@ -1192,7 +1275,7 @@ function SessionList({
     <aside className="session-panel" aria-label="Sessions">
       <div className="panel-header">
         <div>
-          <p className="eyebrow">Switchboard</p>
+          <p className="eyebrow">TermRail</p>
           <h1>Sessions</h1>
         </div>
         <div className="panel-header-actions">
@@ -1437,7 +1520,7 @@ type TerminalPaneProps = {
   error: string | null;
   inputRequest: TerminalInputRequest | null;
   onError: (message: string | null) => void;
-  onOutput: (sessionId: string) => void;
+  onOutput: (sessionId: string, outputAtIso?: string) => void;
   onSize: (size: TerminalSize) => void;
   onStatus: (status: RuntimeStatus) => void;
   session: SessionConfig | null;
@@ -1455,8 +1538,10 @@ function TerminalPane({
   status,
 }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const scrollTrackRef = useRef<HTMLDivElement | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const lastResizeRef = useRef<{ cols: number; rows: number } | null>(null);
+  const scrollPointerIdRef = useRef<number | null>(null);
   const statusRef = useRef<RuntimeStatus | undefined>(status);
   const terminalRef = useRef<Terminal | null>(null);
   const writeFrameRef = useRef<number | null>(null);
@@ -1468,6 +1553,10 @@ function TerminalPane({
   const [connectionState, setConnectionState] = useState<
     "idle" | "connecting" | "connected" | "closed"
   >("idle");
+  const [scrollState, setScrollState] = useState<TerminalScrollState>({
+    viewportY: 0,
+    baseY: 0,
+  });
 
   const sendTerminalInput = useCallback(
     (data: string, reportErrors: boolean) => {
@@ -1534,6 +1623,134 @@ function TerminalPane({
     socket.send(JSON.stringify({ type: "resize", sessionId, ...size }));
   }, []);
 
+  const updateTerminalScrollState = useCallback(
+    (terminal = terminalRef.current) => {
+      const next = readTerminalScrollState(terminal);
+      setScrollState((current) =>
+        current.viewportY === next.viewportY && current.baseY === next.baseY
+          ? current
+          : next,
+      );
+    },
+    [],
+  );
+
+  const scrollTerminalToClientY = useCallback(
+    (clientY: number) => {
+      const terminal = terminalRef.current;
+      const track = scrollTrackRef.current;
+      if (!terminal || !track || scrollState.baseY === 0) {
+        return;
+      }
+
+      const rect = track.getBoundingClientRect();
+      const ratio = clampValue(
+        ((clientY - rect.top) / rect.height) * 1000,
+        0,
+        1000,
+      );
+      terminal.scrollToLine(Math.round((ratio / 1000) * scrollState.baseY));
+      updateTerminalScrollState(terminal);
+    },
+    [scrollState.baseY, updateTerminalScrollState],
+  );
+
+  const scrollTerminalToLine = useCallback(
+    (line: number) => {
+      const terminal = terminalRef.current;
+      if (!terminal || scrollState.baseY === 0) {
+        return;
+      }
+
+      terminal.scrollToLine(clampValue(line, 0, scrollState.baseY));
+      updateTerminalScrollState(terminal);
+    },
+    [scrollState.baseY, updateTerminalScrollState],
+  );
+
+  const handleScrollPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (scrollState.baseY === 0) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      scrollPointerIdRef.current = event.pointerId;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      scrollTerminalToClientY(event.clientY);
+    },
+    [scrollState.baseY, scrollTerminalToClientY],
+  );
+
+  const handleScrollPointerMove = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (scrollPointerIdRef.current !== event.pointerId) {
+        return;
+      }
+
+      event.preventDefault();
+      scrollTerminalToClientY(event.clientY);
+    },
+    [scrollTerminalToClientY],
+  );
+
+  const handleScrollPointerUp = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (scrollPointerIdRef.current !== event.pointerId) {
+        return;
+      }
+
+      scrollPointerIdRef.current = null;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      event.preventDefault();
+      scrollTerminalToClientY(event.clientY);
+    },
+    [scrollTerminalToClientY],
+  );
+
+  const handleScrollKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      const terminal = terminalRef.current;
+      if (!terminal || scrollState.baseY === 0) {
+        return;
+      }
+
+      const pageStep = Math.max(1, terminal.rows - 1);
+      let nextLine: number | null = null;
+
+      switch (event.key) {
+        case "ArrowUp":
+          nextLine = scrollState.viewportY - 1;
+          break;
+        case "ArrowDown":
+          nextLine = scrollState.viewportY + 1;
+          break;
+        case "PageUp":
+          nextLine = scrollState.viewportY - pageStep;
+          break;
+        case "PageDown":
+          nextLine = scrollState.viewportY + pageStep;
+          break;
+        case "Home":
+          nextLine = 0;
+          break;
+        case "End":
+          nextLine = scrollState.baseY;
+          break;
+        default:
+          return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      scrollTerminalToLine(nextLine);
+    },
+    [scrollState.baseY, scrollState.viewportY, scrollTerminalToLine],
+  );
+
   const handleFitTerminal = useCallback(() => {
     const terminal = terminalRef.current;
     if (terminal) {
@@ -1541,9 +1758,10 @@ function TerminalPane({
       publishTerminalSize(terminal.cols, terminal.rows);
       sendResize(terminal.cols, terminal.rows);
       terminal.refresh(0, Math.max(0, terminal.rows - 1));
+      updateTerminalScrollState(terminal);
       terminal.focus();
     }
-  }, [publishTerminalSize, sendResize]);
+  }, [publishTerminalSize, sendResize, updateTerminalScrollState]);
 
   const copyTerminalSelection = useCallback(
     async (terminal: Terminal) => {
@@ -1609,35 +1827,42 @@ function TerminalPane({
     [onError],
   );
 
-  const flushTerminalWrites = useCallback((generation: number) => {
-    const terminal = terminalRef.current;
-    if (
-      !terminal ||
-      writeInProgressRef.current ||
-      generation !== writeGenerationRef.current
-    ) {
-      return;
-    }
-
-    const data = writeQueueRef.current;
-    writeQueueRef.current = "";
-    if (!data) {
-      return;
-    }
-
-    writeInProgressRef.current = true;
-    terminal.write(data, () => {
-      writeInProgressRef.current = false;
-      if (generation !== writeGenerationRef.current || !writeQueueRef.current) {
+  const flushTerminalWrites = useCallback(
+    (generation: number) => {
+      const terminal = terminalRef.current;
+      if (
+        !terminal ||
+        writeInProgressRef.current ||
+        generation !== writeGenerationRef.current
+      ) {
         return;
       }
 
-      writeFrameRef.current = window.requestAnimationFrame(() => {
-        writeFrameRef.current = null;
-        flushTerminalWrites(generation);
+      const data = writeQueueRef.current;
+      writeQueueRef.current = "";
+      if (!data) {
+        return;
+      }
+
+      writeInProgressRef.current = true;
+      terminal.write(data, () => {
+        writeInProgressRef.current = false;
+        updateTerminalScrollState(terminal);
+        if (
+          generation !== writeGenerationRef.current ||
+          !writeQueueRef.current
+        ) {
+          return;
+        }
+
+        writeFrameRef.current = window.requestAnimationFrame(() => {
+          writeFrameRef.current = null;
+          flushTerminalWrites(generation);
+        });
       });
-    });
-  }, []);
+    },
+    [updateTerminalScrollState],
+  );
 
   const scheduleTerminalWriteFlush = useCallback(() => {
     if (writeFrameRef.current !== null || writeInProgressRef.current) {
@@ -1662,18 +1887,22 @@ function TerminalPane({
     [scheduleTerminalWriteFlush],
   );
 
-  const resetTerminalOutput = useCallback((terminal: Terminal) => {
-    writeGenerationRef.current += 1;
-    writeQueueRef.current = "";
-    writeInProgressRef.current = false;
+  const resetTerminalOutput = useCallback(
+    (terminal: Terminal) => {
+      writeGenerationRef.current += 1;
+      writeQueueRef.current = "";
+      writeInProgressRef.current = false;
 
-    if (writeFrameRef.current !== null) {
-      window.cancelAnimationFrame(writeFrameRef.current);
-      writeFrameRef.current = null;
-    }
+      if (writeFrameRef.current !== null) {
+        window.cancelAnimationFrame(writeFrameRef.current);
+        writeFrameRef.current = null;
+      }
 
-    terminal.reset();
-  }, []);
+      terminal.reset();
+      updateTerminalScrollState(terminal);
+    },
+    [updateTerminalScrollState],
+  );
 
   useEffect(() => {
     statusRef.current = status;
@@ -1725,6 +1954,7 @@ function TerminalPane({
     }
     fitAddon.fit();
     publishTerminalSize(terminal.cols, terminal.rows);
+    updateTerminalScrollState(terminal);
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
@@ -1759,6 +1989,18 @@ function TerminalPane({
     const resizeDisposable = terminal.onResize(({ cols, rows }) => {
       publishTerminalSize(cols, rows);
       sendResize(cols, rows);
+      updateTerminalScrollState(terminal);
+    });
+
+    const scrollDisposable = terminal.onScroll(() => {
+      updateTerminalScrollState(terminal);
+    });
+    const viewport = container.querySelector(".xterm-viewport");
+    const handleViewportScroll = () => {
+      updateTerminalScrollState(terminal);
+    };
+    viewport?.addEventListener("scroll", handleViewportScroll, {
+      passive: true,
     });
 
     return () => {
@@ -1769,11 +2011,14 @@ function TerminalPane({
         window.cancelAnimationFrame(writeFrameRef.current);
         writeFrameRef.current = null;
       }
+      viewport?.removeEventListener("scroll", handleViewportScroll);
+      scrollDisposable.dispose();
       resizeDisposable.dispose();
       inputDisposable.dispose();
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
+      setScrollState({ viewportY: 0, baseY: 0 });
     };
   }, [
     copyTerminalSelection,
@@ -1781,6 +2026,7 @@ function TerminalPane({
     publishTerminalSize,
     sendResize,
     sendTerminalInput,
+    updateTerminalScrollState,
   ]);
 
   useEffect(() => {
@@ -1803,6 +2049,7 @@ function TerminalPane({
           publishTerminalSize(terminal.cols, terminal.rows);
           sendResize(terminal.cols, terminal.rows);
           terminal.refresh(0, Math.max(0, terminal.rows - 1));
+          updateTerminalScrollState(terminal);
         }
       });
     };
@@ -1817,7 +2064,7 @@ function TerminalPane({
       }
       resizeObserver.disconnect();
     };
-  }, [publishTerminalSize, sendResize]);
+  }, [publishTerminalSize, sendResize, updateTerminalScrollState]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -1827,6 +2074,7 @@ function TerminalPane({
 
     if (!terminal || !sessionId) {
       setConnectionState("idle");
+      setScrollState({ viewportY: 0, baseY: 0 });
       return undefined;
     }
 
@@ -1838,7 +2086,9 @@ function TerminalPane({
     wsRef.current = socket;
 
     socket.addEventListener("open", () => {
-      socket.send(JSON.stringify({ type: "subscribe", sessionId }));
+      socket.send(
+        JSON.stringify({ type: "subscribe", sessionId, includeBuffer: true }),
+      );
       sendResize(terminal.cols, terminal.rows);
       setConnectionState("connected");
     });
@@ -1873,7 +2123,7 @@ function TerminalPane({
           break;
         case "terminal.output":
           queueTerminalWrite(message.data);
-          onOutput(message.sessionId);
+          onOutput(message.sessionId, message.at);
           break;
         case "session.status":
           onStatus(message.status);
@@ -1922,6 +2172,13 @@ function TerminalPane({
   }, [inputRequest, sendTerminalInput]);
 
   const running = status?.state === "running";
+  const hasScrollback = scrollState.baseY > 0;
+  const scrollProgress = hasScrollback
+    ? scrollState.viewportY / scrollState.baseY
+    : 0;
+  const scrollThumbTop = `calc(${(scrollProgress * 100).toFixed(3)}% - ${(
+    scrollProgress * 34
+  ).toFixed(1)}px)`;
 
   return (
     <section className="terminal-panel" aria-label="Terminal">
@@ -1953,6 +2210,34 @@ function TerminalPane({
         onClick={() => terminalRef.current?.focus()}
       >
         <div className="terminal-host" ref={containerRef} />
+        <div className="terminal-scroll-rail" aria-hidden={!hasScrollback}>
+          <div
+            aria-disabled={!hasScrollback}
+            aria-label="Terminal scrollback"
+            aria-orientation="vertical"
+            aria-valuemax={scrollState.baseY}
+            aria-valuemin={0}
+            aria-valuenow={scrollState.viewportY}
+            className={`terminal-scroll-control${
+              hasScrollback ? "" : " disabled"
+            }`}
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={handleScrollKeyDown}
+            onPointerCancel={handleScrollPointerUp}
+            onPointerDown={handleScrollPointerDown}
+            onPointerMove={handleScrollPointerMove}
+            onPointerUp={handleScrollPointerUp}
+            ref={scrollTrackRef}
+            role="scrollbar"
+            tabIndex={hasScrollback ? 0 : -1}
+            title="Drag to scroll terminal history"
+          >
+            <span
+              className="terminal-scroll-thumb"
+              style={{ top: scrollThumbTop }}
+            />
+          </div>
+        </div>
       </div>
       <footer className="terminal-footer">
         <span>PID {status?.pid ?? "-"}</span>
