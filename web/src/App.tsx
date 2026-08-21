@@ -2275,7 +2275,7 @@ type PromptDraftCacheEntry = {
   updatedAt: number;
 };
 
-const promptDraftCacheKey = "codex-switchboard.promptDraft.v2";
+const promptDraftCacheKey = "termrail.promptDraft.v2";
 
 function newPromptDraft(): PromptDraft {
   return {

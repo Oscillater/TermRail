@@ -131,14 +131,14 @@ Copy-Item data/config.example.json data/config.json
 
 ## Environment
 
-| Variable            | Default                     | Description                                   |
-| ------------------- | --------------------------- | --------------------------------------------- |
-| `HOST`              | `127.0.0.1`                 | Backend bind host.                            |
-| `PORT`              | `8787`                      | Backend port.                                 |
-| `AUTH_TOKEN`        | empty                       | Token accepted by the HTTP API and WebSocket. |
-| `CONFIG_PATH`       | `data/config.json`          | Runtime config path override.                 |
-| `SWITCHBOARD_SHELL` | `powershell.exe` on Windows | PTY shell override used by the server.        |
-| `VITE_AUTH_TOKEN`   | empty                       | Frontend token for manual Vite startup.       |
+| Variable          | Default                     | Description                                   |
+| ----------------- | --------------------------- | --------------------------------------------- |
+| `HOST`            | `127.0.0.1`                 | Backend bind host.                            |
+| `PORT`            | `8787`                      | Backend port.                                 |
+| `AUTH_TOKEN`      | empty                       | Token accepted by the HTTP API and WebSocket. |
+| `CONFIG_PATH`     | `data/config.json`          | Runtime config path override.                 |
+| `TERMRAIL_SHELL`  | `powershell.exe` on Windows | PTY shell override used by the server.        |
+| `VITE_AUTH_TOKEN` | empty                       | Frontend token for manual Vite startup.       |
 
 When using `start.ps1`, setting `AUTH_TOKEN` is enough; the script mirrors it into `VITE_AUTH_TOKEN` before starting the UI.
 

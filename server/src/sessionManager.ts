@@ -95,7 +95,7 @@ function delay(ms: number): Promise<void> {
 
 function shellForCommand(command: string): { file: string; args: string[] } {
   if (process.platform === "win32") {
-    const file = process.env.SWITCHBOARD_SHELL || "powershell.exe";
+    const file = process.env.TERMRAIL_SHELL || "powershell.exe";
     return {
       file,
       args: [
