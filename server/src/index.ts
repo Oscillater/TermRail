@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { terminalSizeLimits, type TerminalSize } from "@termrail/shared";
 import express, {
   type NextFunction,
   type Request,
@@ -10,7 +11,7 @@ import { authMiddleware } from "./auth.js";
 import { ConfigStore } from "./configStore.js";
 import { HttpError } from "./errors.js";
 import { listDirectoryRoots, listSubdirectories } from "./filesystem.js";
-import { SessionManager, type TerminalSize } from "./sessionManager.js";
+import { SessionManager } from "./sessionManager.js";
 import { attachWebSocketServer } from "./ws.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -60,10 +61,10 @@ function optionalStartSize(value: unknown): TerminalSize | undefined {
     typeof record.rows !== "number" ||
     !Number.isInteger(record.cols) ||
     !Number.isInteger(record.rows) ||
-    record.cols < 10 ||
-    record.rows < 3 ||
-    record.cols > 500 ||
-    record.rows > 200
+    record.cols < terminalSizeLimits.minCols ||
+    record.rows < terminalSizeLimits.minRows ||
+    record.cols > terminalSizeLimits.maxCols ||
+    record.rows > terminalSizeLimits.maxRows
   ) {
     throw new HttpError(
       400,

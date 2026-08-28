@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { idPattern } from "@termrail/shared";
 import type { AppConfig, PromptExample, SessionConfig } from "./types.js";
 import { HttpError } from "./errors.js";
-
-const idPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {

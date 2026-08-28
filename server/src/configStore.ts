@@ -1,5 +1,5 @@
 import { dirname } from "node:path";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import type { AppConfig, PromptExample, SessionConfig } from "./types.js";
 import { HttpError } from "./errors.js";
 import {
@@ -21,6 +21,7 @@ function cloneSession(session: SessionConfig): SessionConfig {
 
 export class ConfigStore {
   private config: AppConfig = { prompts: [], sessions: [] };
+  private updateQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly filePath: string) {}
 
@@ -56,11 +57,18 @@ export class ConfigStore {
 
   async save(): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
-    await writeFile(
-      this.filePath,
-      `${JSON.stringify(this.config, null, 2)}\n`,
-      "utf8",
-    );
+    const tempPath = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      await writeFile(
+        tempPath,
+        `${JSON.stringify(this.config, null, 2)}\n`,
+        "utf8",
+      );
+      await rename(tempPath, this.filePath);
+    } catch (error) {
+      await rm(tempPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   listSessions(): SessionConfig[] {
@@ -78,30 +86,20 @@ export class ConfigStore {
 
   async createSession(input: unknown): Promise<SessionConfig> {
     const session = sessionFromInput(input, { generateId: true });
-    if (this.config.sessions.some((item) => item.id === session.id)) {
-      throw new HttpError(
-        409,
-        "SESSION_EXISTS",
-        `Session "${session.id}" already exists`,
-      );
-    }
-    this.config.sessions.push(session);
-    await this.save();
-    return cloneSession(session);
+    return await this.updateConfig(() => {
+      if (this.config.sessions.some((item) => item.id === session.id)) {
+        throw new HttpError(
+          409,
+          "SESSION_EXISTS",
+          `Session "${session.id}" already exists`,
+        );
+      }
+      this.config.sessions.push(session);
+      return cloneSession(session);
+    });
   }
 
   async updateSession(id: string, input: unknown): Promise<SessionConfig> {
-    const index = this.config.sessions.findIndex(
-      (session) => session.id === id,
-    );
-    if (index === -1) {
-      throw new HttpError(
-        404,
-        "SESSION_NOT_FOUND",
-        `Session "${id}" was not found`,
-      );
-    }
-
     if (input === null || typeof input !== "object" || Array.isArray(input)) {
       throw new HttpError(
         400,
@@ -119,36 +117,73 @@ export class ConfigStore {
       );
     }
 
-    const updated = sessionFromInput(
-      { ...this.config.sessions[index], ...patch, id },
-      { id },
-    );
-    this.config.sessions[index] = updated;
-    await this.save();
-    return cloneSession(updated);
+    return await this.updateConfig(() => {
+      const index = this.config.sessions.findIndex(
+        (session) => session.id === id,
+      );
+      if (index === -1) {
+        throw new HttpError(
+          404,
+          "SESSION_NOT_FOUND",
+          `Session "${id}" was not found`,
+        );
+      }
+
+      const updated = sessionFromInput(
+        { ...this.config.sessions[index], ...patch, id },
+        { id },
+      );
+      this.config.sessions[index] = updated;
+      return cloneSession(updated);
+    });
   }
 
   async updatePrompts(input: unknown): Promise<PromptExample[]> {
     const prompts = promptsFromInput(input);
-    this.config.prompts = prompts;
-    await this.save();
-    return clonePrompts(prompts);
+    return await this.updateConfig(() => {
+      this.config.prompts = prompts;
+      return clonePrompts(prompts);
+    });
   }
 
   async deleteSession(id: string): Promise<SessionConfig> {
-    const index = this.config.sessions.findIndex(
-      (session) => session.id === id,
-    );
-    if (index === -1) {
-      throw new HttpError(
-        404,
-        "SESSION_NOT_FOUND",
-        `Session "${id}" was not found`,
+    return await this.updateConfig(() => {
+      const index = this.config.sessions.findIndex(
+        (session) => session.id === id,
       );
-    }
+      if (index === -1) {
+        throw new HttpError(
+          404,
+          "SESSION_NOT_FOUND",
+          `Session "${id}" was not found`,
+        );
+      }
 
-    const [removed] = this.config.sessions.splice(index, 1);
-    await this.save();
-    return cloneSession(removed);
+      const [removed] = this.config.sessions.splice(index, 1);
+      return cloneSession(removed);
+    });
+  }
+
+  private async updateConfig<T>(mutator: () => T): Promise<T> {
+    const update = this.updateQueue.then(async () => {
+      const previousConfig = {
+        prompts: clonePrompts(this.config.prompts),
+        sessions: this.config.sessions.map(cloneSession),
+      };
+      try {
+        const result = mutator();
+        await this.save();
+        return result;
+      } catch (error) {
+        this.config = previousConfig;
+        throw error;
+      }
+    });
+
+    this.updateQueue = update.then(
+      () => undefined,
+      () => undefined,
+    );
+    return await update;
   }
 }

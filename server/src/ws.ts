@@ -1,15 +1,14 @@
 import type { Server } from "node:http";
+import { terminalSizeLimits, type WsClientMessage } from "@termrail/shared";
 import { WebSocket, WebSocketServer } from "ws";
 import type { ConfigStore } from "./configStore.js";
 import { HttpError } from "./errors.js";
 import { isAuthorized } from "./auth.js";
 import type { SessionManager } from "./sessionManager.js";
 
-type ClientMessage =
-  | { type: "subscribe"; sessionId: string; includeBuffer: boolean }
-  | { type: "unsubscribe"; sessionId: string }
-  | { type: "input"; sessionId: string; data: string }
-  | { type: "resize"; sessionId: string; cols: number; rows: number };
+type ClientMessage = WsClientMessage & {
+  includeBuffer?: boolean;
+};
 
 type JsonMessage = Record<string, unknown>;
 
@@ -85,10 +84,10 @@ function parseClientMessage(raw: WebSocket.RawData): ClientMessage {
         );
       }
       if (
-        parsed.cols < 10 ||
-        parsed.rows < 3 ||
-        parsed.cols > 500 ||
-        parsed.rows > 200
+        parsed.cols < terminalSizeLimits.minCols ||
+        parsed.rows < terminalSizeLimits.minRows ||
+        parsed.cols > terminalSizeLimits.maxCols ||
+        parsed.rows > terminalSizeLimits.maxRows
       ) {
         throw new HttpError(
           400,
@@ -210,8 +209,14 @@ export function attachWebSocketServer(
     subscriptions.get(sessionId)?.forEach((ws) => send(ws, payload));
   }
 
-  sessionManager.on("output", ({ sessionId, data, at }) => {
-    broadcast(sessionId, { type: "terminal.output", sessionId, data, at });
+  sessionManager.on("output", ({ sessionId, data, at, seq }) => {
+    broadcast(sessionId, {
+      type: "terminal.output",
+      sessionId,
+      data,
+      at,
+      seq,
+    });
   });
 
   sessionManager.on("status", (status) => {
@@ -230,7 +235,7 @@ export function attachWebSocketServer(
 
         switch (message.type) {
           case "subscribe":
-            subscribe(ws, message.sessionId, message.includeBuffer);
+            subscribe(ws, message.sessionId, message.includeBuffer ?? true);
             break;
           case "unsubscribe":
             unsubscribe(ws, message.sessionId);

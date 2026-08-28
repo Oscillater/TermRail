@@ -2,11 +2,13 @@ import { EventEmitter } from "node:events";
 import { access, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import { terminalSizeLimits } from "@termrail/shared";
 import * as pty from "node-pty";
 import { HttpError } from "./errors.js";
 import type {
   RuntimeStatus,
   SessionConfig,
+  TerminalSize,
   TerminalOutputEvent,
 } from "./types.js";
 
@@ -21,6 +23,7 @@ type RuntimeRecord = {
   lastOutputAt: string | null;
   exitCode: number | null;
   pid: number | null;
+  nextOutputSeq: number;
   exitPromise: Promise<void> | null;
   resolveExit: (() => void) | null;
 };
@@ -32,17 +35,6 @@ type SessionManagerEvents = {
 
 const maxBufferChars = 2_000_000;
 const defaultTerminalSize = { cols: 120, rows: 36 };
-const terminalSizeLimits = {
-  minCols: 10,
-  maxCols: 500,
-  minRows: 3,
-  maxRows: 200,
-};
-
-export type TerminalSize = {
-  cols: number;
-  rows: number;
-};
 
 function now(): string {
   return new Date().toISOString();
@@ -82,6 +74,7 @@ function stoppedRecord(size: TerminalSize): RuntimeRecord {
     lastOutputAt: null,
     exitCode: null,
     pid: null,
+    nextOutputSeq: 1,
     exitPromise: null,
     resolveExit: null,
   };
@@ -209,6 +202,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       lastOutputAt: null,
       exitCode: null,
       pid: terminal.pid,
+      nextOutputSeq: existing?.nextOutputSeq ?? 1,
       exitPromise,
       resolveExit,
     };
@@ -226,7 +220,9 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         activeRecord.buffer = activeRecord.buffer.slice(-maxBufferChars);
       }
       activeRecord.lastOutputAt = outputAt;
-      this.emit("output", { sessionId: session.id, data, at: outputAt });
+      const seq = activeRecord.nextOutputSeq;
+      activeRecord.nextOutputSeq += 1;
+      this.emit("output", { sessionId: session.id, data, at: outputAt, seq });
     });
 
     terminal.onExit(({ exitCode }) => {

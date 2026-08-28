@@ -3,14 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "workspaces": [
+    "shared",
     "server",
     "web"
   ],
   "scripts": {
     "start": "npm run dev",
-    "dev": "concurrently -n server,web -c blue,green \"npm run dev --workspace server\" \"npm run dev --workspace web\"",
-    "dev:server": "npm run dev --workspace server",
-    "dev:web": "npm run dev --workspace web",
+    "dev": "npm run build --workspace @termrail/shared && concurrently -n server,web -c blue,green \"npm run dev --workspace server\" \"npm run dev --workspace web\"",
+    "dev:server": "npm run build --workspace @termrail/shared && npm run dev --workspace server",
+    "dev:web": "npm run build --workspace @termrail/shared && npm run dev --workspace web",
     "build": "npm run build --workspaces --if-present",
     "check": "npm run check --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
