@@ -5,8 +5,10 @@ import { messageFromError } from "../utils/errors";
 import { makeLocalId } from "../utils/id";
 
 type PromptPanelProps = {
+  collapsed: boolean;
   error: string | null;
   onTerminalInput: (data: string) => void;
+  onToggleCollapsed: () => void;
   onUpdatePrompts: (prompts: PromptExample[]) => Promise<PromptExample[]>;
   prompts: PromptExample[];
   promptsLoaded: boolean;
@@ -129,8 +131,10 @@ function draftFromPrompt(prompt: PromptExample): PromptDraft {
 }
 
 export function PromptPanel({
+  collapsed,
   error,
   onTerminalInput,
+  onToggleCollapsed,
   onUpdatePrompts,
   prompts,
   promptsLoaded,
@@ -289,6 +293,26 @@ export function PromptPanel({
     }
   };
 
+  if (collapsed) {
+    return (
+      <aside
+        aria-label="Prompt examples"
+        className="prompt-panel panel-collapsed"
+      >
+        <button
+          aria-expanded={false}
+          aria-label="Show prompts panel"
+          className="panel-rail-button"
+          onClick={onToggleCollapsed}
+          type="button"
+        >
+          <span className="panel-rail-title">Prompts</span>
+          <span className="panel-rail-action">Show</span>
+        </button>
+      </aside>
+    );
+  }
+
   return (
     <aside className="prompt-panel" aria-label="Prompt examples">
       <div className="panel-header">
@@ -296,14 +320,25 @@ export function PromptPanel({
           <p className="eyebrow">Editable</p>
           <h2>Prompt Examples</h2>
         </div>
-        <button
-          className="primary-button"
-          disabled={!promptsLoaded}
-          onClick={openCreateEditor}
-          type="button"
-        >
-          Add
-        </button>
+        <div className="panel-header-actions">
+          <button
+            aria-expanded={true}
+            aria-label="Hide prompts panel"
+            className="ghost-button compact collapse-button"
+            onClick={onToggleCollapsed}
+            type="button"
+          >
+            {">"}
+          </button>
+          <button
+            className="primary-button"
+            disabled={!promptsLoaded}
+            onClick={openCreateEditor}
+            type="button"
+          >
+            Add
+          </button>
+        </div>
       </div>
 
       {editor ? (

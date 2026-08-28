@@ -22,6 +22,7 @@ import { SessionForm } from "./SessionForm";
 
 type SessionPanelProps = {
   actionSessionId: string | null;
+  collapsed: boolean;
   error: string | null;
   loading: boolean;
   onCreateSession: (session: SessionConfig) => Promise<SessionConfig>;
@@ -34,6 +35,7 @@ type SessionPanelProps = {
   onSelect: (sessionId: string) => void;
   onStart: (sessionId: string) => void;
   onStop: (sessionId: string) => void;
+  onToggleCollapsed: () => void;
   outputActivities: OutputActivities;
   selectedSessionId: string | null;
   sessions: SessionConfig[];
@@ -42,6 +44,7 @@ type SessionPanelProps = {
 
 export function SessionPanel({
   actionSessionId,
+  collapsed,
   error,
   loading,
   onCreateSession,
@@ -51,6 +54,7 @@ export function SessionPanel({
   onSelect,
   onStart,
   onStop,
+  onToggleCollapsed,
   outputActivities,
   selectedSessionId,
   sessions,
@@ -179,6 +183,23 @@ export function SessionPanel({
     }
   };
 
+  if (collapsed) {
+    return (
+      <aside aria-label="Sessions" className="session-panel panel-collapsed">
+        <button
+          aria-expanded={false}
+          aria-label="Show sessions panel"
+          className="panel-rail-button"
+          onClick={onToggleCollapsed}
+          type="button"
+        >
+          <span className="panel-rail-title">Sessions</span>
+          <span className="panel-rail-action">Show</span>
+        </button>
+      </aside>
+    );
+  }
+
   return (
     <aside className="session-panel" aria-label="Sessions">
       <div className="panel-header">
@@ -186,23 +207,33 @@ export function SessionPanel({
           <p className="eyebrow">TermRail</p>
           <h1>Sessions</h1>
         </div>
-        <div className="panel-header-actions">
-          <button
-            className="ghost-button"
-            disabled={loading}
-            onClick={onRefresh}
-            type="button"
-          >
-            Refresh
-          </button>
-          <button
-            className="primary-button"
-            onClick={openCreateEditor}
-            type="button"
-          >
-            Add
-          </button>
-        </div>
+        <button
+          aria-expanded={true}
+          aria-label="Hide sessions panel"
+          className="ghost-button compact collapse-button"
+          onClick={onToggleCollapsed}
+          type="button"
+        >
+          {"<"}
+        </button>
+      </div>
+
+      <div className="panel-toolbar">
+        <button
+          className="ghost-button"
+          disabled={loading}
+          onClick={onRefresh}
+          type="button"
+        >
+          Refresh
+        </button>
+        <button
+          className="primary-button"
+          onClick={openCreateEditor}
+          type="button"
+        >
+          Add
+        </button>
       </div>
 
       <div className="activity-box" aria-live="polite">
