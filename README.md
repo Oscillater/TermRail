@@ -1,39 +1,30 @@
 # TermRail
 
-Run persistent terminal sessions from a local browser dashboard.
+Local browser dashboard for persistent terminal sessions.
 
-TermRail helps you keep project shells, coding agents, and development servers in one place. Each session has a saved working directory and command, runs through a real PTY, streams output over WebSocket, and stays available while you switch between sessions.
+TermRail keeps project shells, coding agents, and development servers in one browser UI. Each session has a saved working directory, can hold multiple terminal tabs, runs commands through a real PTY, streams output over WebSocket, and keeps runtime buffers available while you switch between sessions.
+
+TermRail is built for trusted local developer workstations. It is not a hosted terminal service, a tmux replacement, a task runner, or a remote administration tool.
 
 ## Features
 
 - Start, stop, and switch between named terminal sessions.
-- Open multiple terminal tabs inside a session.
-- Browser terminal powered by xterm.js and node-pty.
-- Live output streaming over WebSocket.
-- Activity indicators for sessions producing output in the background.
-- Shared prompt library with copy, insert, and send actions.
-- Local folder picker for session working directories.
-- Large terminal scrollback and server-side buffer retention during runtime.
-- Optional token auth for the HTTP API and WebSocket.
-- Windows startup script for one-command local launch.
-
-## Use Cases
-
-- Keep several project shells open without juggling terminal windows.
-- Run Codex, Claude Code, or other CLI agents in named project sessions.
-- Watch background output and jump into active sessions when needed.
-- Keep reusable prompts next to the terminal where they are used.
-
-## Current Scope
-
-TermRail is early alpha software for local developer workstations. The current focus is a stable Windows workflow with PowerShell, Node.js, npm, and browser-based terminal switching. macOS and Linux use the same Node/PTY stack.
+- Open multiple terminal tabs inside one session.
+- Run real interactive shells through xterm.js and node-pty.
+- Keep live output streaming over WebSocket.
+- See background activity with `Working`, `Quiet`, and `Stopped` indicators.
+- Manage reusable prompts with copy, insert, and send actions.
+- Pick local working directories from the UI.
+- Collapse side panels to give the terminal more room.
+- Keep large terminal scrollback in the browser and server-side buffers during runtime.
+- Protect local HTTP and WebSocket access with an optional auth token.
 
 ## Requirements
 
 - Windows, macOS, or Linux.
 - Node.js `18.x`, `20.x`, or `22+`.
 - npm.
-- On Windows, Visual Studio C++ build tools may be required when the `node-pty` prebuilt package is unavailable.
+- On Windows, Visual Studio C++ build tools may be required if `node-pty` cannot use a prebuilt package.
 
 ## Quick Start
 
@@ -43,7 +34,7 @@ TermRail is early alpha software for local developer workstations. The current f
 powershell -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
-The script checks for Node.js and npm, installs dependencies when `node_modules/` is missing, starts the backend and Vite UI, and opens `http://127.0.0.1:5173`.
+The script checks for Node.js and npm, installs dependencies when `node_modules/` is missing, starts the backend and Vite UI, and opens the app in your browser.
 
 ### Manual Start
 
@@ -52,18 +43,29 @@ npm install
 npm start
 ```
 
-The app runs two local services in development mode:
+Development services:
 
 | Service                   | URL                     |
 | ------------------------- | ----------------------- |
 | UI                        | `http://127.0.0.1:5173` |
 | Backend API and WebSocket | `http://127.0.0.1:8787` |
 
-Vite proxies `/api` and `/ws` to the backend.
+Vite proxies `/api` and `/ws` to the backend during development.
 
 ## Sessions
 
-Open the UI, choose **Add**, and configure a session with an id, display name, working directory, and command.
+Open the UI, choose **Add**, then configure:
+
+| Field       | Description                                                    |
+| ----------- | -------------------------------------------------------------- |
+| `id`        | Stable session id used by the API and WebSocket.               |
+| `name`      | Display name shown in the UI.                                  |
+| `cwd`       | Working directory for terminal commands.                       |
+| `command`   | Default command used by legacy start calls and new tabs.       |
+| `terminals` | Per-session terminal tabs, each with an id, name, and command. |
+| `prompts`   | Legacy per-session prompts; the UI uses global prompts now.    |
+
+Example session:
 
 ```json
 {
@@ -76,42 +78,11 @@ Open the UI, choose **Add**, and configure a session with an id, display name, w
       "id": "main",
       "name": "Main",
       "command": "codex resume"
-    }
-  ],
-  "prompts": []
-}
-```
-
-More examples:
-
-```json
-{
-  "id": "my-project-claude",
-  "name": "My Project Claude",
-  "cwd": "D:\\Project\\my-project",
-  "command": "claude",
-  "terminals": [
+    },
     {
-      "id": "main",
-      "name": "Main",
-      "command": "claude"
-    }
-  ],
-  "prompts": []
-}
-```
-
-```json
-{
-  "id": "powershell",
-  "name": "PowerShell",
-  "cwd": ".",
-  "command": "powershell",
-  "terminals": [
-    {
-      "id": "main",
-      "name": "Main",
-      "command": "powershell"
+      "id": "server",
+      "name": "Dev Server",
+      "command": "npm run dev"
     }
   ],
   "prompts": []
@@ -133,24 +104,11 @@ An empty config is created automatically:
 }
 ```
 
-`data/config.example.json` is safe to commit and is used by the smoke test.
-
-You can copy the example file to start from known-good sample sessions:
+`data/config.example.json` is safe to commit and is used by the smoke test. You can copy it to start from known-good sample sessions:
 
 ```powershell
 Copy-Item data/config.example.json data/config.json
 ```
-
-### Session Fields
-
-| Field       | Description                                                                                 |
-| ----------- | ------------------------------------------------------------------------------------------- |
-| `id`        | Stable session id used by the API and WebSocket.                                            |
-| `name`      | Display name shown in the UI.                                                               |
-| `cwd`       | Working directory for the PTY command.                                                      |
-| `command`   | Default command used by legacy start calls and new terminal tabs.                           |
-| `terminals` | Persistent terminal tabs for the session. Each tab has `id`, `name`, and `command`.         |
-| `prompts`   | Legacy per-session prompt array; the current UI stores the prompt library at the top level. |
 
 ## Environment
 
@@ -167,21 +125,14 @@ When using `start.ps1`, setting `AUTH_TOKEN` is enough; the script mirrors it in
 
 ## Security Model
 
-TermRail binds to `127.0.0.1` by default and is designed for trusted local environments.
+TermRail starts local commands from saved session configuration. Treat access to the app as access to your local shell.
 
-- Saved session configs define the command execution boundary.
-- The start endpoint launches the stored `command` for a known session id.
-- Directory endpoints return folder listings for selecting a session `cwd`.
-- Runtime config stays in `data/config.json`, which is ignored by Git.
-- Remote access belongs behind Tailscale, another private VPN, or a trusted LAN.
-- Set `AUTH_TOKEN` when binding outside localhost.
-
-## Roadmap
-
-- First-run setup flow for creating the initial sessions from the UI.
-- Transcript view with search, copy, clear, and export actions.
-- Screenshots and release notes for a public GitHub launch.
-- Packaging options after the local development workflow is stable.
+- The backend binds to `127.0.0.1` by default.
+- Runtime config is stored locally in `data/config.json`.
+- `data/config.json`, `.env`, and logs are ignored by Git.
+- Directory browsing endpoints are intended for trusted local use.
+- Set `AUTH_TOKEN` before binding outside localhost.
+- Use a private network layer such as Tailscale or another VPN for remote access.
 
 ## API
 
@@ -217,7 +168,7 @@ Client messages:
 ```json
 {
   "type": "subscribe",
-  "sessionId": "test-node-version",
+  "sessionId": "my-project-codex",
   "terminalId": "main",
   "includeBuffer": true
 }
@@ -225,16 +176,8 @@ Client messages:
 
 ```json
 {
-  "type": "unsubscribe",
-  "sessionId": "test-node-version",
-  "terminalId": "main"
-}
-```
-
-```json
-{
   "type": "input",
-  "sessionId": "test-node-version",
+  "sessionId": "my-project-codex",
   "terminalId": "main",
   "data": "hello\r"
 }
@@ -243,16 +186,14 @@ Client messages:
 ```json
 {
   "type": "resize",
-  "sessionId": "test-node-version",
+  "sessionId": "my-project-codex",
   "terminalId": "main",
   "cols": 120,
   "rows": 32
 }
 ```
 
-Set `includeBuffer` to `false` for background activity monitors that only need future output.
-
-Server messages include `subscribed`, `unsubscribed`, `terminal.output`, `terminal.status`, `session.status`, and `error`. `terminal.output` includes an ISO timestamp in `at`.
+Server messages include `subscribed`, `unsubscribed`, `terminal.output`, `terminal.status`, `session.status`, and `error`.
 
 ## Development
 
@@ -270,13 +211,20 @@ npm run smoke --workspace server
 
 The smoke test starts a temporary backend on `127.0.0.1:8797`, loads `data/config.example.json`, subscribes over WebSocket, starts the safe `node -v` session, and verifies PTY output.
 
-## Project Layout
+Project layout:
 
 ```text
 server/   Express API, WebSocket server, PTY session manager
+shared/   Shared TypeScript types and constants
 web/      Vite, React, xterm.js terminal UI
 data/     Example config and local runtime config location
 ```
+
+## Known Issues
+
+- On Windows, the smoke test may print `AttachConsole failed` from node-pty during process cleanup after `smoke ok`. The smoke test still passes when the command exits with status `0`.
+- First-run setup is still manual. If there are no sessions, use **Add** in the UI or copy `data/config.example.json` to `data/config.json`.
+- Runtime terminal buffers are retained while the backend process is running; persistent transcript search/export is not implemented yet.
 
 ## Troubleshooting
 
@@ -284,3 +232,10 @@ data/     Example config and local runtime config location
 - `node-pty` install errors on Windows: install Visual Studio C++ build tools or use a supported Node.js version.
 - Auth-enabled manual startup: set both `AUTH_TOKEN` and `VITE_AUTH_TOKEN` before running `npm start`.
 - TUI size mismatch after startup: use the **Fit** button in the terminal header.
+
+## Roadmap
+
+- First-run setup flow for creating initial sessions from the UI.
+- Transcript view with search, copy, clear, and export actions.
+- README screenshots or GIF once the UI settles.
+- Packaging options after the local development workflow is stable.
