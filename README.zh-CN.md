@@ -241,7 +241,5 @@ data/     Example config and local runtime config location
 
 ## 后续计划
 
-- 做一个首次配置流程，用来创建初始会话。
-- 增加 transcript 视图，支持搜索、复制、清空和导出。
-- UI 稳定后，在 README 里补截图或 GIF。
-- 本地开发工作流稳定后，再考虑 packaging。
+- 评估桌面端打包或安装包分发，让 TermRail 不依赖手动启动本地开发服务。
+- 根据实际使用情况继续改进会话创建、历史输出和导出能力。

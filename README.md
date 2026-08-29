@@ -242,7 +242,5 @@ data/     Example config and local runtime config location
 
 ## Roadmap
 
-- First-run setup flow for creating initial sessions from the UI.
-- Transcript view with search, copy, clear, and export actions.
-- README screenshots or GIF once the UI settles.
-- Packaging options after the local development workflow is stable.
+- Evaluate desktop packaging or installer distribution so TermRail does not require manual local dev-server startup.
+- Refine session creation, terminal history, and export workflows based on real usage.
