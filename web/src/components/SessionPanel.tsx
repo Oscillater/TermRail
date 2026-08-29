@@ -29,7 +29,7 @@ type SessionPanelProps = {
   onDeleteSession: (sessionId: string) => Promise<void>;
   onEditSession: (
     sessionId: string,
-    session: SessionConfig,
+    session: Omit<SessionConfig, "terminals">,
   ) => Promise<SessionConfig>;
   onRefresh: () => void;
   onSelect: (sessionId: string) => void;
@@ -144,14 +144,20 @@ export function SessionPanel({
       editor.mode === "edit"
         ? sessions.find((session) => session.id === editor.originalId)
         : null;
-    const session = sessionFromDraft(draft, existingSession?.prompts ?? []);
+    const nextSession = sessionFromDraft(draft, existingSession?.prompts ?? []);
 
     setSaving(true);
     try {
       if (editor.mode === "create") {
-        await onCreateSession(session);
+        await onCreateSession(nextSession);
       } else {
-        await onEditSession(editor.originalId ?? session.id, session);
+        await onEditSession(editor.originalId ?? nextSession.id, {
+          id: nextSession.id,
+          name: nextSession.name,
+          cwd: nextSession.cwd,
+          command: nextSession.command,
+          prompts: nextSession.prompts,
+        });
       }
       closeEditor();
     } catch (error) {

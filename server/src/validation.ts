@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { idPattern } from "@termrail/shared";
-import type { AppConfig, PromptExample, SessionConfig } from "./types.js";
+import { defaultTerminalId, idPattern } from "@termrail/shared";
+import type {
+  AppConfig,
+  PromptExample,
+  SessionConfig,
+  TerminalConfig,
+} from "./types.js";
 import { HttpError } from "./errors.js";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -84,6 +89,104 @@ function parsePrompts(
   return prompts;
 }
 
+function parseTerminals(
+  value: unknown,
+  errors: string[],
+  field = "terminals",
+): TerminalConfig[] {
+  if (!Array.isArray(value)) {
+    errors.push(`${field} must be an array`);
+    return [];
+  }
+
+  const terminals: TerminalConfig[] = [];
+  const seen = new Set<string>();
+
+  value.forEach((item, index) => {
+    const terminalErrors: string[] = [];
+    const record = asRecord(item);
+    if (!record) {
+      errors.push(`${field}[${index}] must be an object`);
+      return;
+    }
+
+    const id = requireId(record.id, `${field}[${index}].id`, terminalErrors);
+    const name = cleanString(record.name);
+    const command = cleanString(record.command);
+
+    if (!name) {
+      terminalErrors.push(`${field}[${index}].name must be a non-empty string`);
+    }
+    if (!command) {
+      terminalErrors.push(
+        `${field}[${index}].command must be a non-empty string`,
+      );
+    }
+    if (id && seen.has(id)) {
+      terminalErrors.push(`${field}[${index}].id must be unique`);
+    }
+
+    if (terminalErrors.length > 0 || !id || !name || !command) {
+      errors.push(...terminalErrors);
+      return;
+    }
+
+    seen.add(id);
+    terminals.push({ id, name, command });
+  });
+
+  return terminals;
+}
+
+export function terminalFromInput(
+  value: unknown,
+  options: {
+    defaultCommand?: string;
+    generateId?: boolean;
+    id?: string;
+  } = {},
+): TerminalConfig {
+  const errors: string[] = [];
+  const record = asRecord(value);
+
+  if (!record) {
+    throw new HttpError(
+      400,
+      "INVALID_TERMINAL",
+      "Terminal must be a JSON object",
+    );
+  }
+
+  const explicitId = options.id ?? cleanString(record.id);
+  const id = explicitId ?? (options.generateId ? randomUUID() : null);
+  if (id) {
+    requireId(id, "id", errors);
+  } else {
+    errors.push("id must be a non-empty string");
+  }
+
+  const name = cleanString(record.name);
+  const command = cleanString(record.command) ?? options.defaultCommand ?? null;
+
+  if (!name) {
+    errors.push("name must be a non-empty string");
+  }
+  if (!command) {
+    errors.push("command must be a non-empty string");
+  }
+
+  if (errors.length > 0 || !id || !name || !command) {
+    throw new HttpError(
+      400,
+      "INVALID_TERMINAL",
+      "Terminal validation failed",
+      errors,
+    );
+  }
+
+  return { id, name, command };
+}
+
 export function promptsFromInput(value: unknown): PromptExample[] {
   const errors: string[] = [];
   const record = asRecord(value);
@@ -146,6 +249,16 @@ export function sessionFromInput(
   const cwd = cleanString(record.cwd);
   const command = cleanString(record.command);
   const promptsValue = record.prompts ?? [];
+  const terminalsValue =
+    record.terminals === undefined
+      ? [
+          {
+            id: defaultTerminalId,
+            name: "Main",
+            command: command ?? "",
+          },
+        ]
+      : record.terminals;
 
   if (!name) {
     errors.push("name must be a non-empty string");
@@ -158,6 +271,7 @@ export function sessionFromInput(
   }
 
   const prompts = parsePrompts(promptsValue, errors);
+  const terminals = parseTerminals(terminalsValue, errors);
 
   if (errors.length > 0 || !id || !name || !cwd || !command) {
     throw new HttpError(
@@ -168,7 +282,7 @@ export function sessionFromInput(
     );
   }
 
-  return { id, name, cwd, command, prompts };
+  return { id, name, cwd, command, terminals, prompts };
 }
 
 export function sessionsFromConfig(value: unknown): {

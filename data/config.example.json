@@ -6,6 +6,13 @@
       "name": "PowerShell Echo",
       "cwd": ".",
       "command": "Write-Output \"hello from TermRail\"",
+      "terminals": [
+        {
+          "id": "main",
+          "name": "Main",
+          "command": "Write-Output \"hello from TermRail\""
+        }
+      ],
       "prompts": []
     },
     {
@@ -13,6 +20,13 @@
       "name": "Node Version Test",
       "cwd": ".",
       "command": "node -v",
+      "terminals": [
+        {
+          "id": "main",
+          "name": "Main",
+          "command": "node -v"
+        }
+      ],
       "prompts": []
     }
   ]

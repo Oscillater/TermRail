@@ -96,7 +96,7 @@ export function SessionForm({
         />
       ) : null}
       <label>
-        <span>Command</span>
+        <span>Default Command</span>
         <input
           disabled={saving}
           onChange={(event) => onChange("command", event.target.value)}

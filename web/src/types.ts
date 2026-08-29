@@ -4,6 +4,7 @@ export type {
   RuntimeState,
   RuntimeStatus,
   SessionConfig,
+  TerminalConfig,
   TerminalOutputEvent,
   TerminalSize,
   WsClientMessage,
@@ -16,6 +17,7 @@ export type SessionsResponse = {
   prompts?: import("@termrail/shared").PromptExample[];
   sessions: import("@termrail/shared").SessionConfig[];
   statuses: Record<string, RuntimeStatus>;
+  terminalStatuses?: Record<string, Record<string, RuntimeStatus>>;
 };
 
 export type SessionResponse = {
@@ -28,10 +30,26 @@ export type PromptsResponse = {
 
 export type StatusResponse = {
   status: RuntimeStatus;
+  sessionStatus?: RuntimeStatus;
+  terminalStatuses?: Record<string, RuntimeStatus>;
+  terminalStatus?: RuntimeStatus;
 };
 
 export type StatusesResponse = {
   statuses: Record<string, RuntimeStatus>;
+  terminalStatuses?: Record<string, Record<string, RuntimeStatus>>;
+};
+
+export type TerminalsResponse = {
+  terminals: import("@termrail/shared").TerminalConfig[];
+  statuses: Record<string, RuntimeStatus>;
+};
+
+export type TerminalResponse = {
+  session: import("@termrail/shared").SessionConfig;
+  terminal: import("@termrail/shared").TerminalConfig;
+  status?: RuntimeStatus;
+  sessionStatus?: RuntimeStatus;
 };
 
 export type TerminalInputRequest = {
@@ -51,8 +69,14 @@ export type TerminalOutputDelivery = TerminalOutputEvent & {
 export type TerminalSessionSnapshot = {
   id: number;
   sessionId: string;
+  terminalId: string;
   status: RuntimeStatus;
   buffer: string;
+};
+
+export type TerminalTarget = {
+  sessionId: string;
+  terminalId: string;
 };
 
 export type StreamConnectionState =

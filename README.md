@@ -7,6 +7,7 @@ TermRail helps you keep project shells, coding agents, and development servers i
 ## Features
 
 - Start, stop, and switch between named terminal sessions.
+- Open multiple terminal tabs inside a session.
 - Browser terminal powered by xterm.js and node-pty.
 - Live output streaming over WebSocket.
 - Activity indicators for sessions producing output in the background.
@@ -70,6 +71,13 @@ Open the UI, choose **Add**, and configure a session with an id, display name, w
   "name": "My Project Codex",
   "cwd": "D:\\Project\\my-project",
   "command": "codex resume",
+  "terminals": [
+    {
+      "id": "main",
+      "name": "Main",
+      "command": "codex resume"
+    }
+  ],
   "prompts": []
 }
 ```
@@ -82,6 +90,13 @@ More examples:
   "name": "My Project Claude",
   "cwd": "D:\\Project\\my-project",
   "command": "claude",
+  "terminals": [
+    {
+      "id": "main",
+      "name": "Main",
+      "command": "claude"
+    }
+  ],
   "prompts": []
 }
 ```
@@ -92,6 +107,13 @@ More examples:
   "name": "PowerShell",
   "cwd": ".",
   "command": "powershell",
+  "terminals": [
+    {
+      "id": "main",
+      "name": "Main",
+      "command": "powershell"
+    }
+  ],
   "prompts": []
 }
 ```
@@ -121,13 +143,14 @@ Copy-Item data/config.example.json data/config.json
 
 ### Session Fields
 
-| Field     | Description                                                                                 |
-| --------- | ------------------------------------------------------------------------------------------- |
-| `id`      | Stable session id used by the API and WebSocket.                                            |
-| `name`    | Display name shown in the UI.                                                               |
-| `cwd`     | Working directory for the PTY command.                                                      |
-| `command` | Command launched when the session starts.                                                   |
-| `prompts` | Legacy per-session prompt array; the current UI stores the prompt library at the top level. |
+| Field       | Description                                                                                 |
+| ----------- | ------------------------------------------------------------------------------------------- |
+| `id`        | Stable session id used by the API and WebSocket.                                            |
+| `name`      | Display name shown in the UI.                                                               |
+| `cwd`       | Working directory for the PTY command.                                                      |
+| `command`   | Default command used by legacy start calls and new terminal tabs.                           |
+| `terminals` | Persistent terminal tabs for the session. Each tab has `id`, `name`, and `command`.         |
+| `prompts`   | Legacy per-session prompt array; the current UI stores the prompt library at the top level. |
 
 ## Environment
 
@@ -170,41 +193,66 @@ When `AUTH_TOKEN` is set, authenticate with one of these options:
 
 Common HTTP endpoints:
 
-| Method   | Path                                        |
-| -------- | ------------------------------------------- |
-| `GET`    | `/api/sessions`                             |
-| `POST`   | `/api/sessions`                             |
-| `PATCH`  | `/api/sessions/:id`                         |
-| `DELETE` | `/api/sessions/:id`                         |
-| `POST`   | `/api/sessions/:id/start`                   |
-| `POST`   | `/api/sessions/:id/stop`                    |
-| `GET`    | `/api/status`                               |
-| `GET`    | `/api/filesystem/roots`                     |
-| `GET`    | `/api/filesystem/directories?path=<folder>` |
+| Method   | Path                                            |
+| -------- | ----------------------------------------------- |
+| `GET`    | `/api/sessions`                                 |
+| `POST`   | `/api/sessions`                                 |
+| `PATCH`  | `/api/sessions/:id`                             |
+| `DELETE` | `/api/sessions/:id`                             |
+| `POST`   | `/api/sessions/:id/start`                       |
+| `POST`   | `/api/sessions/:id/stop`                        |
+| `GET`    | `/api/sessions/:id/terminals`                   |
+| `POST`   | `/api/sessions/:id/terminals`                   |
+| `POST`   | `/api/sessions/:id/terminals/:terminalId/start` |
+| `POST`   | `/api/sessions/:id/terminals/:terminalId/stop`  |
+| `DELETE` | `/api/sessions/:id/terminals/:terminalId`       |
+| `GET`    | `/api/status`                                   |
+| `GET`    | `/api/filesystem/roots`                         |
+| `GET`    | `/api/filesystem/directories?path=<folder>`     |
 
 WebSocket clients connect to `/ws`.
 
 Client messages:
 
 ```json
-{ "type": "subscribe", "sessionId": "test-node-version", "includeBuffer": true }
+{
+  "type": "subscribe",
+  "sessionId": "test-node-version",
+  "terminalId": "main",
+  "includeBuffer": true
+}
 ```
 
 ```json
-{ "type": "unsubscribe", "sessionId": "test-node-version" }
+{
+  "type": "unsubscribe",
+  "sessionId": "test-node-version",
+  "terminalId": "main"
+}
 ```
 
 ```json
-{ "type": "input", "sessionId": "test-node-version", "data": "hello\r" }
+{
+  "type": "input",
+  "sessionId": "test-node-version",
+  "terminalId": "main",
+  "data": "hello\r"
+}
 ```
 
 ```json
-{ "type": "resize", "sessionId": "test-node-version", "cols": 120, "rows": 32 }
+{
+  "type": "resize",
+  "sessionId": "test-node-version",
+  "terminalId": "main",
+  "cols": 120,
+  "rows": 32
+}
 ```
 
 Set `includeBuffer` to `false` for background activity monitors that only need future output.
 
-Server messages include `subscribed`, `unsubscribed`, `terminal.output`, `session.status`, and `error`. `terminal.output` includes an ISO timestamp in `at`.
+Server messages include `subscribed`, `unsubscribed`, `terminal.output`, `terminal.status`, `session.status`, and `error`. `terminal.output` includes an ISO timestamp in `at`.
 
 ## Development
 

@@ -1,7 +1,11 @@
 import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { terminalSizeLimits, type TerminalSize } from "@termrail/shared";
+import {
+  defaultTerminalId,
+  terminalSizeLimits,
+  type TerminalSize,
+} from "@termrail/shared";
 import express, {
   type NextFunction,
   type Request,
@@ -12,6 +16,7 @@ import { ConfigStore } from "./configStore.js";
 import { HttpError } from "./errors.js";
 import { listDirectoryRoots, listSubdirectories } from "./filesystem.js";
 import { SessionManager } from "./sessionManager.js";
+import type { SessionConfig, TerminalConfig } from "./types.js";
 import { attachWebSocketServer } from "./ws.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -86,6 +91,50 @@ async function main(): Promise<void> {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
 
+  function getSessionOrThrow(sessionId: string): SessionConfig {
+    const session = configStore.getSession(sessionId);
+    if (!session) {
+      throw new HttpError(
+        404,
+        "SESSION_NOT_FOUND",
+        `Session "${sessionId}" was not found`,
+      );
+    }
+    return session;
+  }
+
+  function getTerminalOrThrow(
+    session: SessionConfig,
+    terminalId: string,
+  ): TerminalConfig {
+    const terminal = session.terminals.find((item) => item.id === terminalId);
+    if (!terminal) {
+      throw new HttpError(
+        404,
+        "TERMINAL_NOT_FOUND",
+        `Terminal "${terminalId}" was not found`,
+      );
+    }
+    return terminal;
+  }
+
+  function runtimePayload(sessions: SessionConfig[]) {
+    return {
+      statuses: Object.fromEntries(
+        sessions.map((session) => [
+          session.id,
+          sessionManager.getSessionStatus(session),
+        ]),
+      ),
+      terminalStatuses: Object.fromEntries(
+        sessions.map((session) => [
+          session.id,
+          sessionManager.getTerminalStatuses(session),
+        ]),
+      ),
+    };
+  }
+
   app.get("/health", (_request, response) => {
     response.json({ ok: true });
   });
@@ -97,12 +146,7 @@ async function main(): Promise<void> {
     response.json({
       prompts: configStore.listPrompts(),
       sessions,
-      statuses: Object.fromEntries(
-        sessions.map((session) => [
-          session.id,
-          sessionManager.getStatus(session.id),
-        ]),
-      ),
+      ...runtimePayload(sessions),
     });
   });
 
@@ -167,77 +211,154 @@ async function main(): Promise<void> {
   app.delete(
     "/api/sessions/:id",
     asyncRoute(async (request, response) => {
-      const existing = configStore.getSession(request.params.id);
-      if (!existing) {
-        throw new HttpError(
-          404,
-          "SESSION_NOT_FOUND",
-          `Session "${request.params.id}" was not found`,
-        );
-      }
-      await sessionManager.stop(existing.id);
+      const existing = getSessionOrThrow(request.params.id);
+      await sessionManager.deleteSessionRuntime(existing.id);
       const session = await configStore.deleteSession(existing.id);
       response.json({ session });
+    }),
+  );
+
+  app.get(
+    "/api/sessions/:id/terminals",
+    asyncRoute(async (request, response) => {
+      const session = getSessionOrThrow(request.params.id);
+      response.json({
+        terminals: session.terminals,
+        statuses: sessionManager.getTerminalStatuses(session),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/sessions/:id/terminals",
+    asyncRoute(async (request, response) => {
+      const session = getSessionOrThrow(request.params.id);
+      const terminal = await configStore.createTerminal(
+        session.id,
+        request.body,
+      );
+      const updatedSession = getSessionOrThrow(session.id);
+      let terminalStatus;
+      try {
+        terminalStatus = await sessionManager.start(
+          updatedSession,
+          terminal,
+          optionalStartSize(request.body),
+        );
+      } catch (error) {
+        await configStore
+          .deleteTerminal(session.id, terminal.id)
+          .catch(() => undefined);
+        throw error;
+      }
+
+      response.status(201).json({
+        session: updatedSession,
+        terminal,
+        status: terminalStatus,
+        sessionStatus: sessionManager.getSessionStatus(updatedSession),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/sessions/:id/terminals/:terminalId/start",
+    asyncRoute(async (request, response) => {
+      const session = getSessionOrThrow(request.params.id);
+      const terminal = getTerminalOrThrow(session, request.params.terminalId);
+      const status = await sessionManager.start(
+        session,
+        terminal,
+        optionalStartSize(request.body),
+      );
+      response.json({
+        status,
+        sessionStatus: sessionManager.getSessionStatus(session),
+      });
+    }),
+  );
+
+  app.post(
+    "/api/sessions/:id/terminals/:terminalId/stop",
+    asyncRoute(async (request, response) => {
+      const session = getSessionOrThrow(request.params.id);
+      getTerminalOrThrow(session, request.params.terminalId);
+      const status = await sessionManager.stop(
+        session.id,
+        request.params.terminalId,
+      );
+      response.json({
+        status,
+        sessionStatus: sessionManager.getSessionStatus(session),
+      });
+    }),
+  );
+
+  app.delete(
+    "/api/sessions/:id/terminals/:terminalId",
+    asyncRoute(async (request, response) => {
+      const session = getSessionOrThrow(request.params.id);
+      getTerminalOrThrow(session, request.params.terminalId);
+      await sessionManager.stop(session.id, request.params.terminalId);
+      const terminal = await configStore.deleteTerminal(
+        session.id,
+        request.params.terminalId,
+      );
+      sessionManager.deleteTerminalRuntime(
+        session.id,
+        request.params.terminalId,
+      );
+      const updatedSession = getSessionOrThrow(session.id);
+      response.json({
+        session: updatedSession,
+        terminal,
+        sessionStatus: sessionManager.getSessionStatus(updatedSession),
+      });
     }),
   );
 
   app.post(
     "/api/sessions/:id/start",
     asyncRoute(async (request, response) => {
-      const session = configStore.getSession(request.params.id);
-      if (!session) {
-        throw new HttpError(
-          404,
-          "SESSION_NOT_FOUND",
-          `Session "${request.params.id}" was not found`,
-        );
-      }
-      const status = await sessionManager.start(
+      const session = getSessionOrThrow(request.params.id);
+      const terminal = getTerminalOrThrow(session, defaultTerminalId);
+      const terminalStatus = await sessionManager.start(
         session,
+        terminal,
         optionalStartSize(request.body),
       );
-      response.json({ status });
+      response.json({
+        status: sessionManager.getSessionStatus(session),
+        terminalStatus,
+      });
     }),
   );
 
   app.post(
     "/api/sessions/:id/stop",
     asyncRoute(async (request, response) => {
-      const session = configStore.getSession(request.params.id);
-      if (!session) {
-        throw new HttpError(
-          404,
-          "SESSION_NOT_FOUND",
-          `Session "${request.params.id}" was not found`,
-        );
-      }
-      const status = await sessionManager.stop(session.id);
-      response.json({ status });
+      const session = getSessionOrThrow(request.params.id);
+      await sessionManager.stopSession(session.id);
+      response.json({
+        status: sessionManager.getSessionStatus(session),
+        terminalStatuses: sessionManager.getTerminalStatuses(session),
+      });
     }),
   );
 
   app.get(
     "/api/sessions/:id/status",
     asyncRoute(async (request, response) => {
-      const session = configStore.getSession(request.params.id);
-      if (!session) {
-        throw new HttpError(
-          404,
-          "SESSION_NOT_FOUND",
-          `Session "${request.params.id}" was not found`,
-        );
-      }
-      response.json({ status: sessionManager.getStatus(session.id) });
+      const session = getSessionOrThrow(request.params.id);
+      response.json({
+        status: sessionManager.getSessionStatus(session),
+        terminalStatuses: sessionManager.getTerminalStatuses(session),
+      });
     }),
   );
 
   app.get("/api/status", (_request, response) => {
-    const statuses = Object.fromEntries(
-      configStore
-        .listSessions()
-        .map((session) => [session.id, sessionManager.getStatus(session.id)]),
-    );
-    response.json({ statuses });
+    response.json(runtimePayload(configStore.listSessions()));
   });
 
   app.use(

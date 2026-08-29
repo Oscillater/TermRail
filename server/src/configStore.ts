@@ -1,22 +1,66 @@
 import { dirname } from "node:path";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import type { AppConfig, PromptExample, SessionConfig } from "./types.js";
+import { defaultTerminalId } from "@termrail/shared";
+import type {
+  AppConfig,
+  PromptExample,
+  SessionConfig,
+  TerminalConfig,
+} from "./types.js";
 import { HttpError } from "./errors.js";
 import {
   promptsFromInput,
   sessionFromInput,
   sessionsFromConfig,
+  terminalFromInput,
 } from "./validation.js";
 
 function clonePrompts(prompts: PromptExample[]): PromptExample[] {
   return prompts.map((prompt) => ({ ...prompt }));
 }
 
+function cloneTerminals(terminals: TerminalConfig[]): TerminalConfig[] {
+  return terminals.map((terminal) => ({ ...terminal }));
+}
+
 function cloneSession(session: SessionConfig): SessionConfig {
   return {
     ...session,
+    terminals: cloneTerminals(session.terminals),
     prompts: clonePrompts(session.prompts),
   };
+}
+
+function terminalsEqual(
+  left: TerminalConfig[],
+  right: TerminalConfig[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((terminal, index) => {
+      const other = right[index];
+      if (!other) {
+        return false;
+      }
+      return (
+        terminal.id === other.id &&
+        terminal.name === other.name &&
+        terminal.command === other.command
+      );
+    })
+  );
+}
+
+function syncDefaultTerminalCommand(
+  terminals: TerminalConfig[],
+  previousCommand: string,
+  nextCommand: string,
+): TerminalConfig[] {
+  return terminals.map((terminal) =>
+    terminal.id === defaultTerminalId && terminal.command === previousCommand
+      ? { ...terminal, command: nextCommand }
+      : { ...terminal },
+  );
 }
 
 export class ConfigStore {
@@ -84,6 +128,18 @@ export class ConfigStore {
     return session ? cloneSession(session) : null;
   }
 
+  listTerminals(sessionId: string): TerminalConfig[] {
+    const session = this.config.sessions.find((item) => item.id === sessionId);
+    return session ? cloneTerminals(session.terminals) : [];
+  }
+
+  getTerminal(sessionId: string, terminalId: string): TerminalConfig | null {
+    const terminal = this.config.sessions
+      .find((session) => session.id === sessionId)
+      ?.terminals.find((item) => item.id === terminalId);
+    return terminal ? { ...terminal } : null;
+  }
+
   async createSession(input: unknown): Promise<SessionConfig> {
     const session = sessionFromInput(input, { generateId: true });
     return await this.updateConfig(() => {
@@ -129,10 +185,27 @@ export class ConfigStore {
         );
       }
 
-      const updated = sessionFromInput(
-        { ...this.config.sessions[index], ...patch, id },
-        { id },
-      );
+      const current = this.config.sessions[index];
+      const parsed = sessionFromInput({ ...current, ...patch, id }, { id });
+      if (
+        "terminals" in patch &&
+        !terminalsEqual(parsed.terminals, current.terminals)
+      ) {
+        throw new HttpError(
+          400,
+          "TERMINALS_READ_ONLY",
+          "Session terminals must be managed through the terminal endpoints",
+        );
+      }
+
+      const updated: SessionConfig = {
+        ...parsed,
+        terminals: syncDefaultTerminalCommand(
+          current.terminals,
+          current.command,
+          parsed.command,
+        ),
+      };
       this.config.sessions[index] = updated;
       return cloneSession(updated);
     });
@@ -143,6 +216,71 @@ export class ConfigStore {
     return await this.updateConfig(() => {
       this.config.prompts = prompts;
       return clonePrompts(prompts);
+    });
+  }
+
+  async createTerminal(
+    sessionId: string,
+    input: unknown,
+  ): Promise<TerminalConfig> {
+    return await this.updateConfig(() => {
+      const session = this.config.sessions.find(
+        (item) => item.id === sessionId,
+      );
+      if (!session) {
+        throw new HttpError(
+          404,
+          "SESSION_NOT_FOUND",
+          `Session "${sessionId}" was not found`,
+        );
+      }
+
+      const terminal = terminalFromInput(input, {
+        defaultCommand: session.command,
+        generateId: true,
+      });
+      if (session.terminals.some((item) => item.id === terminal.id)) {
+        throw new HttpError(
+          409,
+          "TERMINAL_EXISTS",
+          `Terminal "${terminal.id}" already exists`,
+        );
+      }
+
+      session.terminals.push(terminal);
+      return { ...terminal };
+    });
+  }
+
+  async deleteTerminal(
+    sessionId: string,
+    terminalId: string,
+  ): Promise<TerminalConfig> {
+    return await this.updateConfig(() => {
+      const session = this.config.sessions.find(
+        (item) => item.id === sessionId,
+      );
+      if (!session) {
+        throw new HttpError(
+          404,
+          "SESSION_NOT_FOUND",
+          `Session "${sessionId}" was not found`,
+        );
+      }
+
+      const index = session.terminals.findIndex(
+        (terminal) => terminal.id === terminalId,
+      );
+      if (index === -1) {
+        throw new HttpError(
+          404,
+          "TERMINAL_NOT_FOUND",
+          `Terminal "${terminalId}" was not found`,
+        );
+      }
+
+      const [removed] = session.terminals.splice(index, 1);
+      return { ...removed };
     });
   }
 

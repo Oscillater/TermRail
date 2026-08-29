@@ -4,6 +4,7 @@ export type {
   RuntimeState,
   RuntimeStatus,
   SessionConfig,
+  TerminalConfig,
   TerminalOutputEvent,
   TerminalSize,
   WsClientMessage,

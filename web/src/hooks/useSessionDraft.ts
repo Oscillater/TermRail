@@ -1,8 +1,10 @@
 import { useState } from "react";
 import {
+  defaultTerminalId,
   idPattern,
   type PromptExample,
   type SessionConfig,
+  type TerminalConfig,
 } from "@termrail/shared";
 import { makeLocalId } from "../utils/id";
 
@@ -39,12 +41,21 @@ export function draftFromSession(session: SessionConfig): SessionDraft {
 export function sessionFromDraft(
   draft: SessionDraft,
   prompts: PromptExample[],
+  terminals?: TerminalConfig[],
 ): SessionConfig {
+  const command = draft.command.trim();
   return {
     id: draft.id.trim(),
     name: draft.name.trim(),
     cwd: draft.cwd.trim(),
-    command: draft.command.trim(),
+    command,
+    terminals: terminals ?? [
+      {
+        id: defaultTerminalId,
+        name: "Main",
+        command,
+      },
+    ],
     prompts,
   };
 }

@@ -89,17 +89,29 @@ export function App() {
         statuses={app.statuses}
       />
       <TerminalPane
+        actionTerminalKey={app.actionTerminalKey}
         connectionState={app.streamConnectionState}
         error={app.terminalError}
         inputRequest={app.terminalInputRequest}
+        onCreateTerminal={app.createTerminal}
+        onDeleteTerminal={app.deleteTerminal}
         onError={app.setTerminalError}
         onInput={app.sendTerminalInput}
         onResize={app.sendTerminalResize}
+        onSelectTerminal={app.selectTerminal}
         onSize={app.setTerminalSize}
+        onStartTerminal={(sessionId, terminalId) =>
+          void app.runTerminalAction(sessionId, terminalId, "start")
+        }
+        onStopTerminal={(sessionId, terminalId) =>
+          void app.runTerminalAction(sessionId, terminalId, "stop")
+        }
         output={app.terminalOutput}
         session={app.selectedSession}
         snapshot={app.terminalSnapshot}
-        status={app.selectedStatus}
+        status={app.selectedTerminalStatus}
+        terminal={app.selectedTerminal}
+        terminalStatuses={app.selectedTerminalStatuses}
       />
       <PromptPanel
         collapsed={collapsedPanels.prompts}
@@ -115,7 +127,7 @@ export function App() {
         prompts={app.prompts}
         promptsLoaded={app.promptsLoaded}
         session={app.selectedSession}
-        status={app.selectedStatus}
+        status={app.selectedTerminalStatus}
       />
     </main>
   );

@@ -1,13 +1,18 @@
 import type { Server } from "node:http";
-import { terminalSizeLimits, type WsClientMessage } from "@termrail/shared";
+import {
+  defaultTerminalId,
+  terminalSizeLimits,
+  type WsClientMessage,
+} from "@termrail/shared";
 import { WebSocket, WebSocketServer } from "ws";
+import { isAuthorized } from "./auth.js";
 import type { ConfigStore } from "./configStore.js";
 import { HttpError } from "./errors.js";
-import { isAuthorized } from "./auth.js";
 import type { SessionManager } from "./sessionManager.js";
 
 type ClientMessage = WsClientMessage & {
   includeBuffer?: boolean;
+  terminalId: string;
 };
 
 type JsonMessage = Record<string, unknown>;
@@ -40,6 +45,11 @@ function parseClientMessage(raw: WebSocket.RawData): ClientMessage {
     );
   }
 
+  const terminalId =
+    typeof parsed.terminalId === "string"
+      ? parsed.terminalId
+      : defaultTerminalId;
+
   switch (parsed.type) {
     case "subscribe":
       if (
@@ -55,10 +65,11 @@ function parseClientMessage(raw: WebSocket.RawData): ClientMessage {
       return {
         type: "subscribe",
         sessionId: parsed.sessionId,
+        terminalId,
         includeBuffer: parsed.includeBuffer ?? true,
       };
     case "unsubscribe":
-      return { type: "unsubscribe", sessionId: parsed.sessionId };
+      return { type: "unsubscribe", sessionId: parsed.sessionId, terminalId };
     case "input":
       if (typeof parsed.data !== "string") {
         throw new HttpError(
@@ -67,7 +78,12 @@ function parseClientMessage(raw: WebSocket.RawData): ClientMessage {
           "input message must include string data",
         );
       }
-      return { type: "input", sessionId: parsed.sessionId, data: parsed.data };
+      return {
+        type: "input",
+        sessionId: parsed.sessionId,
+        terminalId,
+        data: parsed.data,
+      };
     case "resize":
       if (typeof parsed.cols !== "number" || typeof parsed.rows !== "number") {
         throw new HttpError(
@@ -98,6 +114,7 @@ function parseClientMessage(raw: WebSocket.RawData): ClientMessage {
       return {
         type: "resize",
         sessionId: parsed.sessionId,
+        terminalId,
         cols: parsed.cols,
         rows: parsed.rows,
       };
@@ -138,6 +155,14 @@ function sendError(ws: WebSocket, error: unknown): void {
   });
 }
 
+function subscriptionKey(sessionId: string, terminalId: string): string {
+  return `${sessionId}\u0000${terminalId}`;
+}
+
+function keySessionId(key: string): string {
+  return key.split("\u0000", 1)[0] ?? "";
+}
+
 export function attachWebSocketServer(
   server: Server,
   authToken: string,
@@ -148,12 +173,21 @@ export function attachWebSocketServer(
   const subscriptions = new Map<string, Set<WebSocket>>();
   const clientSubscriptions = new WeakMap<WebSocket, Set<string>>();
 
-  function ensureSession(sessionId: string): void {
-    if (!configStore.getSession(sessionId)) {
+  function ensureTerminal(sessionId: string, terminalId: string): void {
+    const session = configStore.getSession(sessionId);
+    if (!session) {
       throw new HttpError(
         404,
         "SESSION_NOT_FOUND",
         `Session "${sessionId}" was not found`,
+      );
+    }
+
+    if (!session.terminals.some((terminal) => terminal.id === terminalId)) {
+      throw new HttpError(
+        404,
+        "TERMINAL_NOT_FOUND",
+        `Terminal "${terminalId}" was not found`,
       );
     }
   }
@@ -161,58 +195,86 @@ export function attachWebSocketServer(
   function subscribe(
     ws: WebSocket,
     sessionId: string,
+    terminalId: string,
     includeBuffer: boolean,
   ): void {
-    ensureSession(sessionId);
+    ensureTerminal(sessionId, terminalId);
 
-    let clients = subscriptions.get(sessionId);
+    const key = subscriptionKey(sessionId, terminalId);
+    let clients = subscriptions.get(key);
     if (!clients) {
       clients = new Set<WebSocket>();
-      subscriptions.set(sessionId, clients);
+      subscriptions.set(key, clients);
     }
     clients.add(ws);
 
-    let sessions = clientSubscriptions.get(ws);
-    if (!sessions) {
-      sessions = new Set<string>();
-      clientSubscriptions.set(ws, sessions);
+    let clientKeys = clientSubscriptions.get(ws);
+    if (!clientKeys) {
+      clientKeys = new Set<string>();
+      clientSubscriptions.set(ws, clientKeys);
     }
-    sessions.add(sessionId);
+    clientKeys.add(key);
 
     send(ws, {
       type: "subscribed",
       sessionId,
-      status: sessionManager.getStatus(sessionId),
-      buffer: includeBuffer ? sessionManager.getBuffer(sessionId) : "",
+      terminalId,
+      status: sessionManager.getStatus(sessionId, terminalId),
+      buffer: includeBuffer
+        ? sessionManager.getBuffer(sessionId, terminalId)
+        : "",
     });
   }
 
-  function unsubscribe(ws: WebSocket, sessionId: string): void {
-    subscriptions.get(sessionId)?.delete(ws);
-    clientSubscriptions.get(ws)?.delete(sessionId);
-    send(ws, { type: "unsubscribed", sessionId });
+  function unsubscribe(
+    ws: WebSocket,
+    sessionId: string,
+    terminalId: string,
+  ): void {
+    const key = subscriptionKey(sessionId, terminalId);
+    subscriptions.get(key)?.delete(ws);
+    clientSubscriptions.get(ws)?.delete(key);
+    send(ws, { type: "unsubscribed", sessionId, terminalId });
   }
 
   function cleanup(ws: WebSocket): void {
-    const sessions = clientSubscriptions.get(ws);
-    if (!sessions) {
+    const clientKeys = clientSubscriptions.get(ws);
+    if (!clientKeys) {
       return;
     }
 
-    sessions.forEach((sessionId) => {
-      subscriptions.get(sessionId)?.delete(ws);
+    clientKeys.forEach((key) => {
+      subscriptions.get(key)?.delete(ws);
     });
     clientSubscriptions.delete(ws);
   }
 
-  function broadcast(sessionId: string, payload: unknown): void {
-    subscriptions.get(sessionId)?.forEach((ws) => send(ws, payload));
+  function broadcastTerminal(
+    sessionId: string,
+    terminalId: string,
+    payload: unknown,
+  ): void {
+    subscriptions
+      .get(subscriptionKey(sessionId, terminalId))
+      ?.forEach((ws) => send(ws, payload));
   }
 
-  sessionManager.on("output", ({ sessionId, data, at, seq }) => {
-    broadcast(sessionId, {
+  function broadcastSession(sessionId: string, payload: unknown): void {
+    const clients = new Set<WebSocket>();
+    subscriptions.forEach((subscribers, key) => {
+      if (keySessionId(key) !== sessionId) {
+        return;
+      }
+      subscribers.forEach((ws) => clients.add(ws));
+    });
+    clients.forEach((ws) => send(ws, payload));
+  }
+
+  sessionManager.on("output", ({ sessionId, terminalId, data, at, seq }) => {
+    broadcastTerminal(sessionId, terminalId, {
       type: "terminal.output",
       sessionId,
+      terminalId,
       data,
       at,
       seq,
@@ -220,10 +282,26 @@ export function attachWebSocketServer(
   });
 
   sessionManager.on("status", (status) => {
-    broadcast(status.sessionId, {
+    const terminalId = status.terminalId;
+    if (!terminalId) {
+      return;
+    }
+
+    broadcastTerminal(status.sessionId, terminalId, {
+      type: "terminal.status",
+      sessionId: status.sessionId,
+      terminalId,
+      status,
+    });
+
+    const session = configStore.getSession(status.sessionId);
+    if (!session) {
+      return;
+    }
+    broadcastSession(status.sessionId, {
       type: "session.status",
       sessionId: status.sessionId,
-      status,
+      status: sessionManager.getSessionStatus(session),
     });
   });
 
@@ -231,24 +309,35 @@ export function attachWebSocketServer(
     ws.on("message", (raw) => {
       try {
         const message = parseClientMessage(raw);
-        ensureSession(message.sessionId);
+        ensureTerminal(message.sessionId, message.terminalId);
 
         switch (message.type) {
           case "subscribe":
-            subscribe(ws, message.sessionId, message.includeBuffer ?? true);
+            subscribe(
+              ws,
+              message.sessionId,
+              message.terminalId,
+              message.includeBuffer ?? true,
+            );
             break;
           case "unsubscribe":
-            unsubscribe(ws, message.sessionId);
+            unsubscribe(ws, message.sessionId, message.terminalId);
             break;
           case "input":
-            sessionManager.write(message.sessionId, message.data);
+            sessionManager.write(
+              message.sessionId,
+              message.terminalId,
+              message.data,
+            );
             break;
           case "resize":
             send(ws, {
-              type: "session.status",
+              type: "terminal.status",
               sessionId: message.sessionId,
+              terminalId: message.terminalId,
               status: sessionManager.resize(
                 message.sessionId,
+                message.terminalId,
                 message.cols,
                 message.rows,
               ),

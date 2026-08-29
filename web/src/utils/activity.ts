@@ -10,9 +10,13 @@ import type {
 export const outputQuietDelayMs = 3_000;
 export const statusRefreshIntervalMs = 2_000;
 
-export function defaultRuntimeStatus(sessionId: string): RuntimeStatus {
+export function defaultRuntimeStatus(
+  sessionId: string,
+  terminalId?: string,
+): RuntimeStatus {
   return {
     sessionId,
+    ...(terminalId ? { terminalId } : {}),
     state: "stopped",
     startedAt: null,
     stoppedAt: null,
@@ -74,6 +78,47 @@ function latestIso(left: string | null, right: string | null): string | null {
   }
 
   return leftTimestamp > rightTimestamp ? left : right;
+}
+
+export function aggregateSessionStatus(
+  session: SessionConfig,
+  terminalStatuses: Record<string, RuntimeStatus> | undefined,
+): RuntimeStatus {
+  const statuses = session.terminals.map(
+    (terminal) =>
+      terminalStatuses?.[terminal.id] ??
+      defaultRuntimeStatus(session.id, terminal.id),
+  );
+  const runningStatuses = statuses.filter(
+    (status) => status.state === "running",
+  );
+  const candidates = runningStatuses.length > 0 ? runningStatuses : statuses;
+  const newest = [...candidates].sort(
+    (left, right) =>
+      (timestampFromIso(right.lastOutputAt) ?? 0) -
+        (timestampFromIso(left.lastOutputAt) ?? 0) ||
+      (timestampFromIso(right.stoppedAt) ?? 0) -
+        (timestampFromIso(left.stoppedAt) ?? 0) ||
+      (timestampFromIso(right.startedAt) ?? 0) -
+        (timestampFromIso(left.startedAt) ?? 0),
+  )[0];
+
+  return {
+    sessionId: session.id,
+    state: runningStatuses.length > 0 ? "running" : "stopped",
+    startedAt: newest?.startedAt ?? null,
+    stoppedAt: runningStatuses.length > 0 ? null : (newest?.stoppedAt ?? null),
+    lastOutputAt: statuses.reduce<string | null>(
+      (latest, status) => latestIso(latest, status.lastOutputAt),
+      null,
+    ),
+    exitCode: runningStatuses.length > 0 ? null : (newest?.exitCode ?? null),
+    pid: runningStatuses[0]?.pid ?? null,
+    bufferLength: statuses.reduce(
+      (total, status) => total + status.bufferLength,
+      0,
+    ),
+  };
 }
 
 export function mergeRuntimeStatus(

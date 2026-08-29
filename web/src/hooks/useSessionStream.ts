@@ -5,29 +5,61 @@ import type {
   StreamConnectionState,
   TerminalOutputDelivery,
   TerminalSessionSnapshot,
+  TerminalTarget,
   WsServerMessage,
 } from "../types";
 
 type UseSessionStreamOptions = {
+  activeTerminal: TerminalTarget | null;
   onError: (message: string | null) => void;
-  onOutput: (sessionId: string, outputAtIso?: string) => void;
-  onStatus: (status: RuntimeStatus) => void;
-  selectedSessionId: string | null;
-  sessionIds: string[];
+  onOutput: (
+    sessionId: string,
+    terminalId: string,
+    outputAtIso?: string,
+  ) => void;
+  onSessionStatus: (status: RuntimeStatus) => void;
+  onTerminalStatus: (status: RuntimeStatus) => void;
+  terminalTargets: TerminalTarget[];
 };
 
 type JsonClientMessage =
-  | { type: "subscribe"; sessionId: string; includeBuffer: boolean }
-  | { type: "unsubscribe"; sessionId: string }
-  | { type: "input"; sessionId: string; data: string }
-  | { type: "resize"; sessionId: string; cols: number; rows: number };
+  | {
+      type: "subscribe";
+      sessionId: string;
+      terminalId: string;
+      includeBuffer: boolean;
+    }
+  | { type: "unsubscribe"; sessionId: string; terminalId: string }
+  | { type: "input"; sessionId: string; terminalId: string; data: string }
+  | {
+      type: "resize";
+      sessionId: string;
+      terminalId: string;
+      cols: number;
+      rows: number;
+    };
+
+function targetKey(target: TerminalTarget): string {
+  return `${target.sessionId}\u0000${target.terminalId}`;
+}
+
+function sameTarget(
+  left: TerminalTarget | null,
+  right: TerminalTarget | null,
+): boolean {
+  return (
+    left?.sessionId === right?.sessionId &&
+    left?.terminalId === right?.terminalId
+  );
+}
 
 export function useSessionStream({
+  activeTerminal,
   onError,
   onOutput,
-  onStatus,
-  selectedSessionId,
-  sessionIds,
+  onSessionStatus,
+  onTerminalStatus,
+  terminalTargets,
 }: UseSessionStreamOptions) {
   const [connectionState, setConnectionState] =
     useState<StreamConnectionState>("idle");
@@ -35,16 +67,19 @@ export function useSessionStream({
     useState<TerminalOutputDelivery | null>(null);
   const [terminalSnapshot, setTerminalSnapshot] =
     useState<TerminalSessionSnapshot | null>(null);
+  const activeTerminalRef = useRef<TerminalTarget | null>(activeTerminal);
   const deliveryIdRef = useRef(0);
-  const latestSeqBySessionRef = useRef<Record<string, number>>({});
-  const selectedSessionIdRef = useRef<string | null>(selectedSessionId);
+  const latestSeqByTerminalRef = useRef<Record<string, number>>({});
   const socketRef = useRef<WebSocket | null>(null);
 
-  const sessionIdsKey = useMemo(() => JSON.stringify(sessionIds), [sessionIds]);
+  const terminalTargetsKey = useMemo(
+    () => JSON.stringify(terminalTargets),
+    [terminalTargets],
+  );
 
   useEffect(() => {
-    selectedSessionIdRef.current = selectedSessionId;
-  }, [selectedSessionId]);
+    activeTerminalRef.current = activeTerminal;
+  }, [activeTerminal]);
 
   const sendJson = useCallback((message: JsonClientMessage): boolean => {
     const socket = socketRef.current;
@@ -56,29 +91,34 @@ export function useSessionStream({
   }, []);
 
   const sendInput = useCallback(
-    (sessionId: string, data: string): boolean =>
-      sendJson({ type: "input", sessionId, data }),
+    (sessionId: string, terminalId: string, data: string): boolean =>
+      sendJson({ type: "input", sessionId, terminalId, data }),
     [sendJson],
   );
 
   const sendResize = useCallback(
-    (sessionId: string, cols: number, rows: number): boolean =>
-      sendJson({ type: "resize", sessionId, cols, rows }),
+    (
+      sessionId: string,
+      terminalId: string,
+      cols: number,
+      rows: number,
+    ): boolean =>
+      sendJson({ type: "resize", sessionId, terminalId, cols, rows }),
     [sendJson],
   );
 
   useEffect(() => {
-    const parsedSessionIds = JSON.parse(sessionIdsKey) as string[];
-    const activeSessionIds = new Set(parsedSessionIds);
-    latestSeqBySessionRef.current = Object.fromEntries(
-      Object.entries(latestSeqBySessionRef.current).filter(([sessionId]) =>
-        activeSessionIds.has(sessionId),
+    const parsedTargets = JSON.parse(terminalTargetsKey) as TerminalTarget[];
+    const activeKeys = new Set(parsedTargets.map(targetKey));
+    latestSeqByTerminalRef.current = Object.fromEntries(
+      Object.entries(latestSeqByTerminalRef.current).filter(([key]) =>
+        activeKeys.has(key),
       ),
     );
 
-    if (parsedSessionIds.length === 0) {
+    if (parsedTargets.length === 0) {
       setConnectionState("idle");
-      latestSeqBySessionRef.current = {};
+      latestSeqByTerminalRef.current = {};
       return undefined;
     }
 
@@ -96,15 +136,16 @@ export function useSessionStream({
         if (closed || socket !== nextSocket) {
           return;
         }
-        latestSeqBySessionRef.current = {};
+        latestSeqByTerminalRef.current = {};
         setConnectionState("connected");
         onError(null);
-        parsedSessionIds.forEach((sessionId) => {
+        parsedTargets.forEach((target) => {
           nextSocket.send(
             JSON.stringify({
               type: "subscribe",
-              sessionId,
-              includeBuffer: sessionId === selectedSessionIdRef.current,
+              sessionId: target.sessionId,
+              terminalId: target.terminalId,
+              includeBuffer: sameTarget(target, activeTerminalRef.current),
             }),
           );
         });
@@ -124,36 +165,57 @@ export function useSessionStream({
 
         switch (message.type) {
           case "subscribed":
-            onStatus(message.status);
-            if (message.sessionId === selectedSessionIdRef.current) {
+            onTerminalStatus(message.status);
+            if (
+              sameTarget(
+                {
+                  sessionId: message.sessionId,
+                  terminalId: message.terminalId,
+                },
+                activeTerminalRef.current,
+              )
+            ) {
               deliveryIdRef.current += 1;
               setTerminalSnapshot({
                 id: deliveryIdRef.current,
                 sessionId: message.sessionId,
+                terminalId: message.terminalId,
                 status: message.status,
                 buffer: message.buffer,
               });
             }
             break;
           case "terminal.output": {
+            const key = targetKey({
+              sessionId: message.sessionId,
+              terminalId: message.terminalId,
+            });
             if (typeof message.seq === "number") {
-              const latestSeq =
-                latestSeqBySessionRef.current[message.sessionId];
+              const latestSeq = latestSeqByTerminalRef.current[key];
               if (latestSeq !== undefined && message.seq <= latestSeq) {
                 break;
               }
-              latestSeqBySessionRef.current = {
-                ...latestSeqBySessionRef.current,
-                [message.sessionId]: message.seq,
+              latestSeqByTerminalRef.current = {
+                ...latestSeqByTerminalRef.current,
+                [key]: message.seq,
               };
             }
 
-            onOutput(message.sessionId, message.at);
-            if (message.sessionId === selectedSessionIdRef.current) {
+            onOutput(message.sessionId, message.terminalId, message.at);
+            if (
+              sameTarget(
+                {
+                  sessionId: message.sessionId,
+                  terminalId: message.terminalId,
+                },
+                activeTerminalRef.current,
+              )
+            ) {
               deliveryIdRef.current += 1;
               setTerminalOutput({
                 deliveryId: deliveryIdRef.current,
                 sessionId: message.sessionId,
+                terminalId: message.terminalId,
                 data: message.data,
                 at: message.at ?? new Date().toISOString(),
                 seq: message.seq ?? 0,
@@ -161,8 +223,11 @@ export function useSessionStream({
             }
             break;
           }
+          case "terminal.status":
+            onTerminalStatus(message.status);
+            break;
           case "session.status":
-            onStatus(message.status);
+            onSessionStatus(message.status);
             break;
           case "error":
             onError(message.error.message);
@@ -194,8 +259,14 @@ export function useSessionStream({
         window.clearTimeout(reconnectTimerId);
       }
       if (socket?.readyState === WebSocket.OPEN) {
-        parsedSessionIds.forEach((sessionId) => {
-          socket?.send(JSON.stringify({ type: "unsubscribe", sessionId }));
+        parsedTargets.forEach((target) => {
+          socket?.send(
+            JSON.stringify({
+              type: "unsubscribe",
+              sessionId: target.sessionId,
+              terminalId: target.terminalId,
+            }),
+          );
         });
       }
       socket?.close();
@@ -203,17 +274,23 @@ export function useSessionStream({
         socketRef.current = null;
       }
     };
-  }, [onError, onOutput, onStatus, sessionIdsKey]);
+  }, [
+    onError,
+    onOutput,
+    onSessionStatus,
+    onTerminalStatus,
+    terminalTargetsKey,
+  ]);
 
   useEffect(() => {
-    if (!selectedSessionId) {
+    if (!activeTerminal) {
       setTerminalOutput(null);
       setTerminalSnapshot(null);
       return;
     }
 
-    const parsedSessionIds = JSON.parse(sessionIdsKey) as string[];
-    if (!parsedSessionIds.includes(selectedSessionId)) {
+    const parsedTargets = JSON.parse(terminalTargetsKey) as TerminalTarget[];
+    if (!parsedTargets.some((target) => sameTarget(target, activeTerminal))) {
       setTerminalOutput(null);
       setTerminalSnapshot(null);
       return;
@@ -221,10 +298,11 @@ export function useSessionStream({
 
     sendJson({
       type: "subscribe",
-      sessionId: selectedSessionId,
+      sessionId: activeTerminal.sessionId,
+      terminalId: activeTerminal.terminalId,
       includeBuffer: true,
     });
-  }, [selectedSessionId, sendJson, sessionIdsKey]);
+  }, [activeTerminal, sendJson, terminalTargetsKey]);
 
   return {
     connectionState,

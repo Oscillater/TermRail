@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
-import { access, stat } from "node:fs/promises";
 import { constants } from "node:fs";
+import { access, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { terminalSizeLimits } from "@termrail/shared";
 import * as pty from "node-pty";
@@ -8,8 +8,9 @@ import { HttpError } from "./errors.js";
 import type {
   RuntimeStatus,
   SessionConfig,
-  TerminalSize,
+  TerminalConfig,
   TerminalOutputEvent,
+  TerminalSize,
 } from "./types.js";
 
 type RuntimeRecord = {
@@ -108,18 +109,75 @@ function shellForCommand(command: string): { file: string; args: string[] } {
   };
 }
 
+function timestampFromIso(value: string | null): number {
+  return value ? Date.parse(value) || 0 : 0;
+}
+
+function latestIso(left: string | null, right: string | null): string | null {
+  return timestampFromIso(left) >= timestampFromIso(right) ? left : right;
+}
+
 export class SessionManager extends EventEmitter<SessionManagerEvents> {
-  private readonly records = new Map<string, RuntimeRecord>();
+  private readonly records = new Map<string, Map<string, RuntimeRecord>>();
 
   constructor(private readonly projectRoot: string) {
     super();
   }
 
-  getStatus(sessionId: string): RuntimeStatus {
-    const record = this.records.get(sessionId);
+  getSessionStatus(session: SessionConfig): RuntimeStatus {
+    const statuses = session.terminals.map((terminal) =>
+      this.getStatus(session.id, terminal.id),
+    );
+    const runningStatuses = statuses.filter(
+      (status) => status.state === "running",
+    );
+    const relevantStatuses =
+      runningStatuses.length > 0 ? runningStatuses : statuses;
+    const newestStatus = [...relevantStatuses].sort(
+      (left, right) =>
+        timestampFromIso(right.lastOutputAt) -
+          timestampFromIso(left.lastOutputAt) ||
+        timestampFromIso(right.stoppedAt) - timestampFromIso(left.stoppedAt) ||
+        timestampFromIso(right.startedAt) - timestampFromIso(left.startedAt),
+    )[0];
+
+    return {
+      sessionId: session.id,
+      state: runningStatuses.length > 0 ? "running" : "stopped",
+      startedAt: latestIso(null, newestStatus?.startedAt ?? null),
+      stoppedAt:
+        runningStatuses.length > 0
+          ? null
+          : latestIso(null, newestStatus?.stoppedAt ?? null),
+      lastOutputAt: statuses.reduce<string | null>(
+        (latest, status) => latestIso(latest, status.lastOutputAt),
+        null,
+      ),
+      exitCode:
+        runningStatuses.length > 0 ? null : (newestStatus?.exitCode ?? null),
+      pid: runningStatuses[0]?.pid ?? null,
+      bufferLength: statuses.reduce(
+        (total, status) => total + status.bufferLength,
+        0,
+      ),
+    };
+  }
+
+  getTerminalStatuses(session: SessionConfig): Record<string, RuntimeStatus> {
+    return Object.fromEntries(
+      session.terminals.map((terminal) => [
+        terminal.id,
+        this.getStatus(session.id, terminal.id),
+      ]),
+    );
+  }
+
+  getStatus(sessionId: string, terminalId: string): RuntimeStatus {
+    const record = this.records.get(sessionId)?.get(terminalId);
     if (!record) {
       return {
         sessionId,
+        terminalId,
         state: "stopped",
         startedAt: null,
         stoppedAt: null,
@@ -132,6 +190,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
 
     return {
       sessionId,
+      terminalId,
       state: record.state,
       startedAt: record.startedAt,
       stoppedAt: record.stoppedAt,
@@ -142,25 +201,27 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     };
   }
 
-  getBuffer(sessionId: string): string {
-    return this.records.get(sessionId)?.buffer ?? "";
+  getBuffer(sessionId: string, terminalId: string): string {
+    return this.records.get(sessionId)?.get(terminalId)?.buffer ?? "";
   }
 
   async start(
     session: SessionConfig,
+    terminalConfig: TerminalConfig,
     requestedSize?: Partial<TerminalSize>,
   ): Promise<RuntimeStatus> {
-    const existing = this.records.get(session.id);
+    const sessionRecords = this.ensureSessionRecords(session.id);
+    const existing = sessionRecords.get(terminalConfig.id);
     if (existing?.state === "running") {
       throw new HttpError(
         409,
-        "SESSION_RUNNING",
-        `Session "${session.id}" is already running`,
+        "TERMINAL_RUNNING",
+        `Terminal "${terminalConfig.id}" is already running`,
       );
     }
 
     const cwd = await this.resolveCwd(session.cwd);
-    const { file, args } = shellForCommand(session.command);
+    const { file, args } = shellForCommand(terminalConfig.command);
     const startedAt = now();
     const terminalSize = normalizeTerminalSize(
       requestedSize ?? {
@@ -207,10 +268,10 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       resolveExit,
     };
 
-    this.records.set(session.id, record);
+    sessionRecords.set(terminalConfig.id, record);
 
     terminal.onData((data) => {
-      const activeRecord = this.records.get(session.id);
+      const activeRecord = this.records.get(session.id)?.get(terminalConfig.id);
       if (!activeRecord) {
         return;
       }
@@ -222,11 +283,17 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       activeRecord.lastOutputAt = outputAt;
       const seq = activeRecord.nextOutputSeq;
       activeRecord.nextOutputSeq += 1;
-      this.emit("output", { sessionId: session.id, data, at: outputAt, seq });
+      this.emit("output", {
+        sessionId: session.id,
+        terminalId: terminalConfig.id,
+        data,
+        at: outputAt,
+        seq,
+      });
     });
 
     terminal.onExit(({ exitCode }) => {
-      const activeRecord = this.records.get(session.id);
+      const activeRecord = this.records.get(session.id)?.get(terminalConfig.id);
       if (!activeRecord) {
         return;
       }
@@ -237,58 +304,96 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       activeRecord.pid = null;
       activeRecord.resolveExit?.();
       activeRecord.resolveExit = null;
-      this.emit("status", this.getStatus(session.id));
+      this.emit("status", this.getStatus(session.id, terminalConfig.id));
     });
 
-    this.emit("status", this.getStatus(session.id));
-    return this.getStatus(session.id);
+    this.emit("status", this.getStatus(session.id, terminalConfig.id));
+    return this.getStatus(session.id, terminalConfig.id);
   }
 
-  async stop(sessionId: string): Promise<RuntimeStatus> {
-    const record = this.records.get(sessionId);
+  async stop(sessionId: string, terminalId: string): Promise<RuntimeStatus> {
+    const record = this.records.get(sessionId)?.get(terminalId);
     if (!record || record.state !== "running" || !record.pty) {
-      return this.getStatus(sessionId);
+      return this.getStatus(sessionId, terminalId);
     }
 
     record.pty.kill();
     await Promise.race([record.exitPromise ?? Promise.resolve(), delay(2000)]);
-    return this.getStatus(sessionId);
+    return this.getStatus(sessionId, terminalId);
   }
 
-  write(sessionId: string, data: string): void {
-    const record = this.records.get(sessionId);
+  async stopSession(sessionId: string): Promise<void> {
+    const terminalIds = [...(this.records.get(sessionId)?.keys() ?? [])];
+    await Promise.all(
+      terminalIds.map((terminalId) => this.stop(sessionId, terminalId)),
+    );
+  }
+
+  async deleteSessionRuntime(sessionId: string): Promise<void> {
+    try {
+      await this.stopSession(sessionId);
+    } finally {
+      this.records.delete(sessionId);
+    }
+  }
+
+  deleteTerminalRuntime(sessionId: string, terminalId: string): void {
+    const sessionRecords = this.records.get(sessionId);
+    sessionRecords?.delete(terminalId);
+    if (sessionRecords?.size === 0) {
+      this.records.delete(sessionId);
+    }
+  }
+
+  write(sessionId: string, terminalId: string, data: string): void {
+    const record = this.records.get(sessionId)?.get(terminalId);
     if (!record || record.state !== "running" || !record.pty) {
       throw new HttpError(
         409,
-        "SESSION_NOT_RUNNING",
-        `Session "${sessionId}" is not running`,
+        "TERMINAL_NOT_RUNNING",
+        `Terminal "${terminalId}" is not running`,
       );
     }
     record.pty.write(data);
   }
 
-  resize(sessionId: string, cols: number, rows: number): RuntimeStatus {
+  resize(
+    sessionId: string,
+    terminalId: string,
+    cols: number,
+    rows: number,
+  ): RuntimeStatus {
     const size = normalizeTerminalSize({ cols, rows });
-    let record = this.records.get(sessionId);
+    const sessionRecords = this.ensureSessionRecords(sessionId);
+    let record = sessionRecords.get(terminalId);
     if (!record) {
       record = stoppedRecord(size);
-      this.records.set(sessionId, record);
+      sessionRecords.set(terminalId, record);
     }
 
     record.cols = size.cols;
     record.rows = size.rows;
     if (record.state !== "running" || !record.pty) {
-      return this.getStatus(sessionId);
+      return this.getStatus(sessionId, terminalId);
     }
 
     record.pty.resize(size.cols, size.rows);
-    return this.getStatus(sessionId);
+    return this.getStatus(sessionId, terminalId);
   }
 
   async stopAll(): Promise<void> {
     await Promise.all(
-      [...this.records.keys()].map((sessionId) => this.stop(sessionId)),
+      [...this.records.keys()].map((sessionId) => this.stopSession(sessionId)),
     );
+  }
+
+  private ensureSessionRecords(sessionId: string): Map<string, RuntimeRecord> {
+    let sessionRecords = this.records.get(sessionId);
+    if (!sessionRecords) {
+      sessionRecords = new Map<string, RuntimeRecord>();
+      this.records.set(sessionId, sessionRecords);
+    }
+    return sessionRecords;
   }
 
   private async resolveCwd(cwd: string): Promise<string> {

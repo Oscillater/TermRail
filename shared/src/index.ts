@@ -4,11 +4,18 @@ export type PromptExample = {
   text: string;
 };
 
+export type TerminalConfig = {
+  id: string;
+  name: string;
+  command: string;
+};
+
 export type SessionConfig = {
   id: string;
   name: string;
   cwd: string;
   command: string;
+  terminals: TerminalConfig[];
   prompts: PromptExample[];
 };
 
@@ -21,6 +28,7 @@ export type RuntimeState = "running" | "stopped";
 
 export type RuntimeStatus = {
   sessionId: string;
+  terminalId?: string;
   state: RuntimeState;
   startedAt: string | null;
   stoppedAt: string | null;
@@ -37,37 +45,59 @@ export type TerminalSize = {
 
 export type TerminalOutputEvent = {
   sessionId: string;
+  terminalId: string;
   data: string;
   at: string;
   seq: number;
 };
 
 export type WsClientMessage =
-  | { type: "subscribe"; sessionId: string; includeBuffer?: boolean }
-  | { type: "unsubscribe"; sessionId: string }
-  | { type: "input"; sessionId: string; data: string }
-  | { type: "resize"; sessionId: string; cols: number; rows: number };
+  | {
+      type: "subscribe";
+      sessionId: string;
+      terminalId?: string;
+      includeBuffer?: boolean;
+    }
+  | { type: "unsubscribe"; sessionId: string; terminalId?: string }
+  | { type: "input"; sessionId: string; terminalId?: string; data: string }
+  | {
+      type: "resize";
+      sessionId: string;
+      terminalId?: string;
+      cols: number;
+      rows: number;
+    };
 
 export type WsServerMessage =
   | {
       type: "subscribed";
       sessionId: string;
+      terminalId: string;
       status: RuntimeStatus;
       buffer: string;
     }
-  | { type: "unsubscribed"; sessionId: string }
+  | { type: "unsubscribed"; sessionId: string; terminalId: string }
   | {
       type: "terminal.output";
       sessionId: string;
+      terminalId: string;
       data: string;
       at?: string;
       seq?: number;
+    }
+  | {
+      type: "terminal.status";
+      sessionId: string;
+      terminalId: string;
+      status: RuntimeStatus;
     }
   | { type: "session.status"; sessionId: string; status: RuntimeStatus }
   | {
       type: "error";
       error: { code: string; message: string; details?: unknown };
     };
+
+export const defaultTerminalId = "main";
 
 export const idPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 

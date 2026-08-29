@@ -9,10 +9,14 @@ import type {
   SessionsResponse,
   StatusesResponse,
   StatusResponse,
+  TerminalConfig,
   TerminalInputRequest,
+  TerminalResponse,
   TerminalSize,
+  TerminalTarget,
 } from "./types";
 import {
+  aggregateSessionStatus,
   collectOutputActivities,
   collectSessionPrompts,
   defaultRuntimeStatus,
@@ -21,11 +25,105 @@ import {
   timestampFromIso,
 } from "./utils/activity";
 
+type TerminalStatusesBySession = Record<string, Record<string, RuntimeStatus>>;
+type ActiveTerminalIds = Record<string, string | null>;
+
+function actionKey(sessionId: string, terminalId: string): string {
+  return `${sessionId}\u0000${terminalId}`;
+}
+
+function syncActiveTerminalIds(
+  current: ActiveTerminalIds,
+  sessions: SessionConfig[],
+): ActiveTerminalIds {
+  const next: ActiveTerminalIds = {};
+  sessions.forEach((session) => {
+    const currentTerminalId = current[session.id] ?? null;
+    next[session.id] = session.terminals.some(
+      (terminal) => terminal.id === currentTerminalId,
+    )
+      ? currentTerminalId
+      : (session.terminals[0]?.id ?? null);
+  });
+  return next;
+}
+
+function nextActiveTerminalIdAfterDelete(
+  previousTerminals: TerminalConfig[],
+  remainingTerminals: TerminalConfig[],
+  deletedTerminalId: string,
+  currentTerminalId: string | null,
+): string | null {
+  if (
+    currentTerminalId &&
+    currentTerminalId !== deletedTerminalId &&
+    remainingTerminals.some((terminal) => terminal.id === currentTerminalId)
+  ) {
+    return currentTerminalId;
+  }
+
+  const deletedIndex = previousTerminals.findIndex(
+    (terminal) => terminal.id === deletedTerminalId,
+  );
+  const candidates =
+    deletedIndex === -1
+      ? []
+      : [
+          previousTerminals[deletedIndex + 1]?.id,
+          previousTerminals[deletedIndex - 1]?.id,
+        ];
+  const adjacentTerminalId = candidates.find(
+    (terminalId): terminalId is string =>
+      Boolean(terminalId) &&
+      remainingTerminals.some((terminal) => terminal.id === terminalId),
+  );
+
+  return adjacentTerminalId ?? remainingTerminals[0]?.id ?? null;
+}
+
+function normalizeTerminalStatuses(
+  sessions: SessionConfig[],
+  statuses: TerminalStatusesBySession | undefined,
+): TerminalStatusesBySession {
+  return Object.fromEntries(
+    sessions.map((session) => {
+      const current = statuses?.[session.id] ?? {};
+      return [
+        session.id,
+        Object.fromEntries(
+          session.terminals.map((terminal) => [
+            terminal.id,
+            current[terminal.id] ??
+              defaultRuntimeStatus(session.id, terminal.id),
+          ]),
+        ),
+      ];
+    }),
+  );
+}
+
+function aggregateStatuses(
+  sessions: SessionConfig[],
+  terminalStatuses: TerminalStatusesBySession,
+): Record<string, RuntimeStatus> {
+  return Object.fromEntries(
+    sessions.map((session) => [
+      session.id,
+      aggregateSessionStatus(session, terminalStatuses[session.id]),
+    ]),
+  );
+}
+
 export function useAppController() {
   const [prompts, setPrompts] = useState<PromptsResponse["prompts"]>([]);
   const [promptsLoaded, setPromptsLoaded] = useState(false);
   const [sessions, setSessions] = useState<SessionConfig[]>([]);
   const [statuses, setStatuses] = useState<Record<string, RuntimeStatus>>({});
+  const [terminalStatuses, setTerminalStatuses] =
+    useState<TerminalStatusesBySession>({});
+  const [activeTerminalIds, setActiveTerminalIds] = useState<ActiveTerminalIds>(
+    {},
+  );
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null,
   );
@@ -35,6 +133,9 @@ export function useAppController() {
   const [activityNow, setActivityNow] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
   const [actionSessionId, setActionSessionId] = useState<string | null>(null);
+  const [actionTerminalKey, setActionTerminalKey] = useState<string | null>(
+    null,
+  );
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [terminalError, setTerminalError] = useState<string | null>(null);
   const [promptError, setPromptError] = useState<string | null>(null);
@@ -43,6 +144,7 @@ export function useAppController() {
   const [terminalSize, setTerminalSize] = useState<TerminalSize | null>(null);
   const sessionsRef = useRef<SessionConfig[]>([]);
   const statusesRef = useRef<Record<string, RuntimeStatus>>({});
+  const terminalStatusesRef = useRef<TerminalStatusesBySession>({});
   const statusRefreshInFlightRef = useRef(false);
   const terminalInputRequestIdRef = useRef(0);
 
@@ -53,10 +155,39 @@ export function useAppController() {
   const selectedStatus = selectedSessionId
     ? statuses[selectedSessionId]
     : undefined;
+  const selectedTerminalId = selectedSessionId
+    ? (activeTerminalIds[selectedSessionId] ?? null)
+    : null;
+  const selectedTerminal = selectedSession
+    ? (selectedSession.terminals.find(
+        (terminal) => terminal.id === selectedTerminalId,
+      ) ?? null)
+    : null;
+  const selectedTerminalStatuses = selectedSessionId
+    ? (terminalStatuses[selectedSessionId] ?? {})
+    : {};
+  const selectedTerminalStatus =
+    selectedSession && selectedTerminal
+      ? (selectedTerminalStatuses[selectedTerminal.id] ??
+        defaultRuntimeStatus(selectedSession.id, selectedTerminal.id))
+      : undefined;
 
-  const sessionIds = useMemo(
-    () => sessions.map((session) => session.id),
+  const terminalTargets = useMemo<TerminalTarget[]>(
+    () =>
+      sessions.flatMap((session) =>
+        session.terminals.map((terminal) => ({
+          sessionId: session.id,
+          terminalId: terminal.id,
+        })),
+      ),
     [sessions],
+  );
+  const activeTerminal = useMemo<TerminalTarget | null>(
+    () =>
+      selectedSessionId && selectedTerminalId
+        ? { sessionId: selectedSessionId, terminalId: selectedTerminalId }
+        : null,
+    [selectedSessionId, selectedTerminalId],
   );
 
   const outputActivities = useMemo(
@@ -70,7 +201,7 @@ export function useAppController() {
     [activityAcknowledgedAt, activityNow, sessions, statuses],
   );
 
-  const updateStatus = useCallback((status: RuntimeStatus) => {
+  const updateSessionStatus = useCallback((status: RuntimeStatus) => {
     setStatuses((current) => {
       const mergedStatus = mergeRuntimeStatus(
         current[status.sessionId],
@@ -83,6 +214,55 @@ export function useAppController() {
       return { ...current, [status.sessionId]: mergedStatus };
     });
   }, []);
+
+  const recomputeSessionStatus = useCallback(
+    (
+      sessionId: string,
+      nextTerminalStatuses: Record<string, RuntimeStatus>,
+    ) => {
+      const session = sessionsRef.current.find((item) => item.id === sessionId);
+      if (!session) {
+        return;
+      }
+
+      const status = aggregateSessionStatus(session, nextTerminalStatuses);
+      statusesRef.current = {
+        ...statusesRef.current,
+        [sessionId]: status,
+      };
+      setStatuses((current) => ({ ...current, [sessionId]: status }));
+    },
+    [],
+  );
+
+  const updateTerminalStatus = useCallback(
+    (status: RuntimeStatus) => {
+      const terminalId = status.terminalId;
+      if (!terminalId) {
+        return;
+      }
+
+      setTerminalStatuses((current) => {
+        const sessionStatuses = current[status.sessionId] ?? {};
+        const mergedStatus = mergeRuntimeStatus(
+          sessionStatuses[terminalId],
+          status,
+        );
+        const nextSessionStatuses = {
+          ...sessionStatuses,
+          [terminalId]: mergedStatus,
+        };
+        const next = {
+          ...current,
+          [status.sessionId]: nextSessionStatuses,
+        };
+        terminalStatusesRef.current = next;
+        recomputeSessionStatus(status.sessionId, nextSessionStatuses);
+        return next;
+      });
+    },
+    [recomputeSessionStatus],
+  );
 
   const acknowledgeActivity = useCallback((sessionId: string) => {
     const acknowledgedAt = Date.now();
@@ -101,37 +281,71 @@ export function useAppController() {
     [acknowledgeActivity],
   );
 
-  const upsertSession = useCallback((session: SessionConfig) => {
-    setSessions((current) => {
-      const existingIndex = current.findIndex((item) => item.id === session.id);
-      if (existingIndex === -1) {
-        return [...current, session];
-      }
+  const selectTerminal = useCallback(
+    (sessionId: string, terminalId: string) => {
+      setActiveTerminalIds((current) => ({
+        ...current,
+        [sessionId]: terminalId,
+      }));
+      setSelectedSessionId(sessionId);
+      acknowledgeActivity(sessionId);
+    },
+    [acknowledgeActivity],
+  );
 
-      return current.map((item) => (item.id === session.id ? session : item));
-    });
-    statusesRef.current = {
-      ...statusesRef.current,
-      [session.id]:
-        statusesRef.current[session.id] ?? defaultRuntimeStatus(session.id),
-    };
-    setStatuses((current) => ({
-      ...current,
-      [session.id]: current[session.id] ?? defaultRuntimeStatus(session.id),
-    }));
-  }, []);
+  const upsertSession = useCallback(
+    (session: SessionConfig) => {
+      setSessions((current) => {
+        const existingIndex = current.findIndex(
+          (item) => item.id === session.id,
+        );
+        const nextSessions =
+          existingIndex === -1
+            ? [...current, session]
+            : current.map((item) => (item.id === session.id ? session : item));
+        sessionsRef.current = nextSessions;
+        return nextSessions;
+      });
+
+      setTerminalStatuses((current) => {
+        const next = normalizeTerminalStatuses([session], {
+          [session.id]: current[session.id] ?? {},
+        });
+        const allStatuses = {
+          ...current,
+          [session.id]: next[session.id] ?? {},
+        };
+        terminalStatusesRef.current = allStatuses;
+        recomputeSessionStatus(session.id, allStatuses[session.id] ?? {});
+        return allStatuses;
+      });
+    },
+    [recomputeSessionStatus],
+  );
 
   const loadSessions = useCallback(async () => {
     setLoading(true);
     setSessionError(null);
     try {
       const data = await jsonRequest<SessionsResponse>("/api/sessions");
+      const nextTerminalStatuses = normalizeTerminalStatuses(
+        data.sessions,
+        data.terminalStatuses,
+      );
+      const nextStatuses =
+        data.statuses ?? aggregateStatuses(data.sessions, nextTerminalStatuses);
       setPrompts(data.prompts ?? collectSessionPrompts(data.sessions));
       setPromptsLoaded(true);
+      sessionsRef.current = data.sessions;
+      statusesRef.current = nextStatuses;
+      terminalStatusesRef.current = nextTerminalStatuses;
       setSessions(data.sessions);
-      statusesRef.current = data.statuses;
-      setStatuses(data.statuses);
+      setStatuses(nextStatuses);
+      setTerminalStatuses(nextTerminalStatuses);
       setActivityNow(Date.now());
+      setActiveTerminalIds((current) =>
+        syncActiveTerminalIds(current, data.sessions),
+      );
       setSelectedSessionId((current) => {
         if (
           current &&
@@ -177,6 +391,7 @@ export function useAppController() {
       });
       return changed ? next : current;
     });
+    setActiveTerminalIds((current) => syncActiveTerminalIds(current, sessions));
   }, [sessions]);
 
   useEffect(() => {
@@ -199,7 +414,7 @@ export function useAppController() {
   }, []);
 
   const handleActivityOutput = useCallback(
-    (sessionId: string, outputAtIso?: string) => {
+    (sessionId: string, terminalId: string, outputAtIso?: string) => {
       if (!sessionsRef.current.some((session) => session.id === sessionId)) {
         return;
       }
@@ -207,11 +422,13 @@ export function useAppController() {
       const receivedAt = Date.now();
       const outputAt = timestampFromIso(outputAtIso ?? null) ?? receivedAt;
       const previousStatus =
-        statusesRef.current[sessionId] ?? defaultRuntimeStatus(sessionId);
+        terminalStatusesRef.current[sessionId]?.[terminalId] ??
+        defaultRuntimeStatus(sessionId, terminalId);
 
-      updateStatus({
+      updateTerminalStatus({
         ...previousStatus,
         sessionId,
+        terminalId,
         state: "running",
         stoppedAt: null,
         exitCode: null,
@@ -219,15 +436,7 @@ export function useAppController() {
       });
       setActivityNow(receivedAt);
     },
-    [updateStatus],
-  );
-
-  const handleSessionStatus = useCallback(
-    (status: RuntimeStatus) => {
-      updateStatus(status);
-      setActivityNow(Date.now());
-    },
-    [updateStatus],
+    [updateTerminalStatus],
   );
 
   const refreshStatuses = useCallback(async () => {
@@ -238,21 +447,32 @@ export function useAppController() {
     statusRefreshInFlightRef.current = true;
     try {
       const data = await jsonRequest<StatusesResponse>("/api/status");
-      Object.values(data.statuses).forEach(handleSessionStatus);
+      const nextTerminalStatuses = normalizeTerminalStatuses(
+        sessionsRef.current,
+        data.terminalStatuses,
+      );
+      const nextStatuses =
+        data.statuses ??
+        aggregateStatuses(sessionsRef.current, nextTerminalStatuses);
+      statusesRef.current = nextStatuses;
+      terminalStatusesRef.current = nextTerminalStatuses;
+      setStatuses(nextStatuses);
+      setTerminalStatuses(nextTerminalStatuses);
       setActivityNow(Date.now());
     } catch {
       // The WebSocket is still the primary live channel; polling is best-effort.
     } finally {
       statusRefreshInFlightRef.current = false;
     }
-  }, [handleSessionStatus]);
+  }, []);
 
   const sessionStream = useSessionStream({
+    activeTerminal,
     onError: setTerminalError,
     onOutput: handleActivityOutput,
-    onStatus: handleSessionStatus,
-    selectedSessionId,
-    sessionIds,
+    onSessionStatus: updateSessionStatus,
+    onTerminalStatus: updateTerminalStatus,
+    terminalTargets,
   });
 
   useEffect(() => {
@@ -276,10 +496,10 @@ export function useAppController() {
     };
   }, [refreshStatuses]);
 
-  const runAction = useCallback(
-    async (sessionId: string, action: "start" | "stop") => {
-      setActionSessionId(sessionId);
-      setSessionError(null);
+  const runTerminalAction = useCallback(
+    async (sessionId: string, terminalId: string, action: "start" | "stop") => {
+      setActionTerminalKey(actionKey(sessionId, terminalId));
+      setTerminalError(null);
       try {
         const startOptions =
           action === "start" && terminalSize
@@ -289,10 +509,58 @@ export function useAppController() {
               }
             : {};
         const data = await jsonRequest<StatusResponse>(
-          `/api/sessions/${encodeURIComponent(sessionId)}/${action}`,
+          `/api/sessions/${encodeURIComponent(
+            sessionId,
+          )}/terminals/${encodeURIComponent(terminalId)}/${action}`,
           { method: "POST", ...startOptions },
         );
-        handleSessionStatus(data.status);
+        updateTerminalStatus(data.status);
+        if (data.sessionStatus) {
+          updateSessionStatus(data.sessionStatus);
+        }
+      } catch (requestError) {
+        setTerminalError(
+          requestError instanceof Error
+            ? requestError.message
+            : `Failed to ${action} terminal`,
+        );
+      } finally {
+        setActionTerminalKey(null);
+      }
+    },
+    [terminalSize, updateSessionStatus, updateTerminalStatus],
+  );
+
+  const runAction = useCallback(
+    async (sessionId: string, action: "start" | "stop") => {
+      setActionSessionId(sessionId);
+      setSessionError(null);
+      try {
+        const session = sessionsRef.current.find(
+          (item) => item.id === sessionId,
+        );
+        if (!session) {
+          throw new Error("Session was not found");
+        }
+
+        if (action === "start") {
+          const terminalId =
+            activeTerminalIds[sessionId] ?? session.terminals[0]?.id ?? null;
+          if (!terminalId) {
+            throw new Error("Create a terminal tab before starting");
+          }
+          await runTerminalAction(sessionId, terminalId, "start");
+          return;
+        }
+
+        const data = await jsonRequest<StatusResponse>(
+          `/api/sessions/${encodeURIComponent(sessionId)}/stop`,
+          { method: "POST" },
+        );
+        updateSessionStatus(data.status);
+        if (data.terminalStatuses) {
+          Object.values(data.terminalStatuses).forEach(updateTerminalStatus);
+        }
       } catch (requestError) {
         setSessionError(
           requestError instanceof Error
@@ -303,7 +571,12 @@ export function useAppController() {
         setActionSessionId(null);
       }
     },
-    [handleSessionStatus, terminalSize],
+    [
+      activeTerminalIds,
+      runTerminalAction,
+      updateSessionStatus,
+      updateTerminalStatus,
+    ],
   );
 
   const createSession = useCallback(
@@ -322,7 +595,7 @@ export function useAppController() {
   );
 
   const updateSession = useCallback(
-    async (sessionId: string, session: SessionConfig) => {
+    async (sessionId: string, session: Omit<SessionConfig, "terminals">) => {
       setSessionError(null);
       const data = await jsonRequest<SessionResponse>(
         `/api/sessions/${encodeURIComponent(sessionId)}`,
@@ -339,6 +612,76 @@ export function useAppController() {
     [selectSession, upsertSession],
   );
 
+  const createTerminal = useCallback(
+    async (
+      sessionId: string,
+      terminal: Pick<TerminalConfig, "name" | "command">,
+    ) => {
+      setTerminalError(null);
+      const body = terminalSize ? { ...terminal, ...terminalSize } : terminal;
+      const data = await jsonRequest<TerminalResponse>(
+        `/api/sessions/${encodeURIComponent(sessionId)}/terminals`,
+        {
+          method: "POST",
+          headers: jsonHeaders(),
+          body: JSON.stringify(body),
+        },
+      );
+      upsertSession(data.session);
+      setActiveTerminalIds((current) => ({
+        ...current,
+        [sessionId]: data.terminal.id,
+      }));
+      setSelectedSessionId(sessionId);
+      if (data.status) {
+        updateTerminalStatus(data.status);
+      }
+      if (data.sessionStatus) {
+        updateSessionStatus(data.sessionStatus);
+      }
+      return data.terminal;
+    },
+    [terminalSize, updateSessionStatus, updateTerminalStatus, upsertSession],
+  );
+
+  const deleteTerminal = useCallback(
+    async (sessionId: string, terminalId: string) => {
+      setTerminalError(null);
+      const previousSession = sessionsRef.current.find(
+        (session) => session.id === sessionId,
+      );
+      const previousTerminals = previousSession?.terminals ?? [];
+      const data = await jsonRequest<TerminalResponse>(
+        `/api/sessions/${encodeURIComponent(
+          sessionId,
+        )}/terminals/${encodeURIComponent(terminalId)}`,
+        { method: "DELETE" },
+      );
+      upsertSession(data.session);
+      setTerminalStatuses((current) => {
+        const nextSessionStatuses = { ...(current[sessionId] ?? {}) };
+        delete nextSessionStatuses[terminalId];
+        const next = { ...current, [sessionId]: nextSessionStatuses };
+        terminalStatusesRef.current = next;
+        return next;
+      });
+      setActiveTerminalIds((current) => ({
+        ...current,
+        [sessionId]: nextActiveTerminalIdAfterDelete(
+          previousTerminals,
+          data.session.terminals,
+          terminalId,
+          current[sessionId] ?? null,
+        ),
+      }));
+      if (data.sessionStatus) {
+        updateSessionStatus(data.sessionStatus);
+      }
+      return data.terminal;
+    },
+    [updateSessionStatus, upsertSession],
+  );
+
   const deleteSession = useCallback(
     async (sessionId: string) => {
       setSessionError(null);
@@ -350,6 +693,7 @@ export function useAppController() {
       const nextSessions = sessions.filter(
         (session) => session.id !== sessionId,
       );
+      sessionsRef.current = nextSessions;
       setSessions(nextSessions);
       setSelectedSessionId((selected) =>
         selected === sessionId ? (nextSessions[0]?.id ?? null) : selected,
@@ -358,6 +702,17 @@ export function useAppController() {
         const next = { ...current };
         delete next[sessionId];
         delete statusesRef.current[sessionId];
+        return next;
+      });
+      setTerminalStatuses((current) => {
+        const next = { ...current };
+        delete next[sessionId];
+        delete terminalStatusesRef.current[sessionId];
+        return next;
+      });
+      setActiveTerminalIds((current) => {
+        const next = { ...current };
+        delete next[sessionId];
         return next;
       });
       setActivityAcknowledgedAt((current) => {
@@ -396,10 +751,13 @@ export function useAppController() {
 
   return {
     actionSessionId,
+    actionTerminalKey,
+    activeTerminal,
     createSession,
+    createTerminal,
     deleteSession,
+    deleteTerminal,
     handleActivityOutput,
-    handleSessionStatus,
     loadSessions,
     loading,
     outputActivities,
@@ -407,10 +765,16 @@ export function useAppController() {
     promptsLoaded,
     requestTerminalInput,
     runAction,
+    runTerminalAction,
     selectedSession,
     selectedSessionId,
     selectedStatus,
+    selectedTerminal,
+    selectedTerminalId,
+    selectedTerminalStatus,
+    selectedTerminalStatuses,
     selectSession,
+    selectTerminal,
     sessionError,
     setTerminalError,
     setTerminalSize,
@@ -424,6 +788,7 @@ export function useAppController() {
     promptError,
     sendTerminalInput: sessionStream.sendInput,
     sendTerminalResize: sessionStream.sendResize,
+    terminalStatuses,
     updatePrompts,
     updateSession,
   };
