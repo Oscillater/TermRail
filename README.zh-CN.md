@@ -229,7 +229,6 @@ data/     Example config and local runtime config location
 
 ## 已知问题
 
-- Windows 上，smoke test 在输出 `smoke ok` 之后，node-pty 可能会在清理进程时打印 `AttachConsole failed`。只要命令以状态码 `0` 退出，smoke test 就是通过的。
 - 还没有首次配置向导。没有会话时，可以在 UI 里点 **Add**，也可以把 `data/config.example.json` 复制成 `data/config.json`。
 - 终端 buffer 只在后端进程运行期间保留；持久化 transcript、搜索和导出还没有实现。
 

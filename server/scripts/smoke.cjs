@@ -15,6 +15,109 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function waitForProcessClose(child, isClosed, timeoutMs) {
+  if (isClosed()) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const timeout = setTimeout(() => finish(false), timeoutMs);
+
+    function finish(closed) {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      child.off("close", onClose);
+      child.off("error", onError);
+      resolve(closed);
+    }
+
+    function onClose() {
+      finish(true);
+    }
+
+    function onError() {
+      finish(true);
+    }
+
+    child.once("close", onClose);
+    child.once("error", onError);
+  });
+}
+
+async function terminateServer(child, isClosed) {
+  if (isClosed()) {
+    return;
+  }
+
+  const gracefulClose = waitForProcessClose(child, isClosed, 5000);
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGTERM");
+  }
+  if (await gracefulClose) {
+    return;
+  }
+
+  const forcedClose = waitForProcessClose(child, isClosed, 2000);
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+  }
+  await forcedClose;
+}
+
+function filterKnownWindowsPtyCleanupNoise(stderr) {
+  if (
+    process.platform !== "win32" ||
+    !stderr.includes("AttachConsole failed") ||
+    !stderr.includes("conpty_console_list_agent")
+  ) {
+    return stderr;
+  }
+
+  const conptyAgentLine =
+    /node_modules[\\/]+node-pty[\\/]+lib[\\/]+conpty_console_list_agent\.js:\d+/;
+  const nodeVersionLine = /^Node\.js v\d+\.\d+\.\d+/;
+  const lines = stderr.split(/\r?\n/);
+  const filtered = [];
+
+  for (let index = 0; index < lines.length;) {
+    if (!conptyAgentLine.test(lines[index])) {
+      filtered.push(lines[index]);
+      index += 1;
+      continue;
+    }
+
+    const blockStart = index;
+    let blockEnd = index;
+    let isKnownCleanupNoise = false;
+    let sawNodeVersionLine = false;
+
+    while (blockEnd < lines.length) {
+      if (lines[blockEnd].includes("Error: AttachConsole failed")) {
+        isKnownCleanupNoise = true;
+      }
+      blockEnd += 1;
+      if (nodeVersionLine.test(lines[blockEnd - 1])) {
+        sawNodeVersionLine = true;
+        break;
+      }
+    }
+
+    if (isKnownCleanupNoise && sawNodeVersionLine) {
+      index = blockEnd;
+      continue;
+    }
+
+    filtered.push(...lines.slice(blockStart, blockEnd));
+    index = blockEnd;
+  }
+
+  return filtered.join("\n").trimEnd();
+}
+
 async function waitForHealth() {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     try {
@@ -626,11 +729,15 @@ async function main() {
 
   let serverStdout = "";
   let serverStderr = "";
+  let serverClosed = false;
   server.stdout.on("data", (chunk) => {
     serverStdout += chunk;
   });
   server.stderr.on("data", (chunk) => {
     serverStderr += chunk;
+  });
+  server.on("close", () => {
+    serverClosed = true;
   });
 
   try {
@@ -647,14 +754,14 @@ async function main() {
     await runDeleteRecreateSessionCleanupCheck();
     console.log(`smoke ok: ${sessionId} output ${JSON.stringify(output)}`);
   } finally {
-    server.kill();
-    await wait(250);
+    await terminateServer(server, () => serverClosed);
     await rm(tempDir, { force: true, recursive: true });
     if (serverStdout.trim()) {
       console.log(serverStdout.trim());
     }
-    if (serverStderr.trim()) {
-      console.error(serverStderr.trim());
+    const filteredStderr = filterKnownWindowsPtyCleanupNoise(serverStderr);
+    if (filteredStderr.trim()) {
+      console.error(filteredStderr.trim());
     }
   }
 }

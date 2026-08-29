@@ -230,7 +230,6 @@ data/     Example config and local runtime config location
 
 ## Known Issues
 
-- On Windows, the smoke test may print `AttachConsole failed` from node-pty during process cleanup after `smoke ok`. The smoke test still passes when the command exits with status `0`.
 - First-run setup is still manual. If there are no sessions, use **Add** in the UI or copy `data/config.example.json` to `data/config.json`.
 - Runtime terminal buffers are retained while the backend process is running; persistent transcript search/export is not implemented yet.
 
