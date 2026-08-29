@@ -1,10 +1,18 @@
 # TermRail
 
+[简体中文](README.zh-CN.md)
+
+<p align="center">
+  <img src="web/public/assets/termrail-icon.png" alt="TermRail logo" width="160" />
+</p>
+
 Local browser dashboard for persistent terminal sessions.
 
-TermRail keeps project shells, coding agents, and development servers in one browser UI. Each session has a saved working directory, can hold multiple terminal tabs, runs commands through a real PTY, streams output over WebSocket, and keeps runtime buffers available while you switch between sessions.
+When working with coding agents across multiple projects, developers often need to keep several long-running shell commands alive at the same time: project shells, development servers, Codex, Claude Code, test commands, and supporting scripts. TermRail organizes those commands into saved, switchable sessions and lets you manage startup, interaction, and output from a local browser UI.
 
-TermRail is built for trusted local developer workstations. It is not a hosted terminal service, a tmux replacement, a task runner, or a remote administration tool.
+TermRail is built for trusted local developer workstations.
+
+![TermRail screenshot](web/public/assets/termrail-screenshot.png)
 
 ## Features
 
