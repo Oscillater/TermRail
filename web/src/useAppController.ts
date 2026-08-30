@@ -132,7 +132,6 @@ export function useAppController() {
   >({});
   const [activityNow, setActivityNow] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
-  const [actionSessionId, setActionSessionId] = useState<string | null>(null);
   const [actionTerminalKey, setActionTerminalKey] = useState<string | null>(
     null,
   );
@@ -531,56 +530,8 @@ export function useAppController() {
     [terminalSize, updateSessionStatus, updateTerminalStatus],
   );
 
-  const runAction = useCallback(
-    async (sessionId: string, action: "start" | "stop") => {
-      setActionSessionId(sessionId);
-      setSessionError(null);
-      try {
-        const session = sessionsRef.current.find(
-          (item) => item.id === sessionId,
-        );
-        if (!session) {
-          throw new Error("Session was not found");
-        }
-
-        if (action === "start") {
-          const terminalId =
-            activeTerminalIds[sessionId] ?? session.terminals[0]?.id ?? null;
-          if (!terminalId) {
-            throw new Error("Create a terminal tab before starting");
-          }
-          await runTerminalAction(sessionId, terminalId, "start");
-          return;
-        }
-
-        const data = await jsonRequest<StatusResponse>(
-          `/api/sessions/${encodeURIComponent(sessionId)}/stop`,
-          { method: "POST" },
-        );
-        updateSessionStatus(data.status);
-        if (data.terminalStatuses) {
-          Object.values(data.terminalStatuses).forEach(updateTerminalStatus);
-        }
-      } catch (requestError) {
-        setSessionError(
-          requestError instanceof Error
-            ? requestError.message
-            : `Failed to ${action} session`,
-        );
-      } finally {
-        setActionSessionId(null);
-      }
-    },
-    [
-      activeTerminalIds,
-      runTerminalAction,
-      updateSessionStatus,
-      updateTerminalStatus,
-    ],
-  );
-
   const createSession = useCallback(
-    async (session: SessionConfig) => {
+    async (session: Omit<SessionConfig, "terminals">) => {
       setSessionError(null);
       const data = await jsonRequest<SessionResponse>("/api/sessions", {
         method: "POST",
@@ -642,6 +593,35 @@ export function useAppController() {
       return data.terminal;
     },
     [terminalSize, updateSessionStatus, updateTerminalStatus, upsertSession],
+  );
+
+  const updateTerminal = useCallback(
+    async (
+      sessionId: string,
+      terminalId: string,
+      terminal: Pick<TerminalConfig, "name" | "command">,
+    ) => {
+      setTerminalError(null);
+      const data = await jsonRequest<TerminalResponse>(
+        `/api/sessions/${encodeURIComponent(
+          sessionId,
+        )}/terminals/${encodeURIComponent(terminalId)}`,
+        {
+          method: "PATCH",
+          headers: jsonHeaders(),
+          body: JSON.stringify(terminal),
+        },
+      );
+      upsertSession(data.session);
+      if (data.status) {
+        updateTerminalStatus(data.status);
+      }
+      if (data.sessionStatus) {
+        updateSessionStatus(data.sessionStatus);
+      }
+      return data.terminal;
+    },
+    [updateSessionStatus, updateTerminalStatus, upsertSession],
   );
 
   const deleteTerminal = useCallback(
@@ -750,9 +730,9 @@ export function useAppController() {
   }, []);
 
   return {
-    actionSessionId,
     actionTerminalKey,
     activeTerminal,
+    activeTerminalIds,
     createSession,
     createTerminal,
     deleteSession,
@@ -764,7 +744,6 @@ export function useAppController() {
     prompts,
     promptsLoaded,
     requestTerminalInput,
-    runAction,
     runTerminalAction,
     selectedSession,
     selectedSessionId,
@@ -791,5 +770,6 @@ export function useAppController() {
     terminalStatuses,
     updatePrompts,
     updateSession,
+    updateTerminal,
   };
 }

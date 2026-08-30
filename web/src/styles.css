@@ -768,8 +768,7 @@ h3 {
   color: #4f5c67;
 }
 
-.session-meta,
-.session-command {
+.session-meta {
   display: block;
   margin-top: 4px;
   color: #606b76;
@@ -779,12 +778,6 @@ h3 {
   overflow-wrap: normal;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.session-command {
-  color: #424b55;
-  font-family:
-    ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
 }
 
 .status-pill {

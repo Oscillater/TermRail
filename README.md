@@ -62,14 +62,14 @@ Vite proxies `/api` and `/ws` to the backend during development.
 
 ## Sessions
 
-Open the UI, choose **Add**, then configure:
+Open the UI and choose **Add** to create a session. A new session starts with
+no terminal tabs; use **New terminal** to add a command.
 
 | Field       | Description                                                    |
 | ----------- | -------------------------------------------------------------- |
 | `id`        | Stable session id used by the API and WebSocket.               |
 | `name`      | Display name shown in the UI.                                  |
 | `cwd`       | Working directory for terminal commands.                       |
-| `command`   | Default command used by legacy start calls and new tabs.       |
 | `terminals` | Per-session terminal tabs, each with an id, name, and command. |
 | `prompts`   | Legacy per-session prompts; the UI uses global prompts now.    |
 
@@ -80,11 +80,10 @@ Example session:
   "id": "my-project-codex",
   "name": "My Project Codex",
   "cwd": "D:\\Project\\my-project",
-  "command": "codex resume",
   "terminals": [
     {
-      "id": "main",
-      "name": "Main",
+      "id": "codex",
+      "name": "Codex",
       "command": "codex resume"
     },
     {
@@ -103,6 +102,11 @@ Session `cwd` values may be absolute or relative to this repository root.
 
 Runtime config lives at `data/config.json`. Git ignores this file because it can contain private local paths and commands.
 
+Older configs with a session-level `command` are migrated when loaded. Existing
+terminal commands take precedence; if an old session has no terminal list, its
+command becomes a `Main` terminal. The normalized format is written on the next
+configuration change.
+
 An empty config is created automatically:
 
 ```json
@@ -120,16 +124,19 @@ Copy-Item data/config.example.json data/config.json
 
 ## Environment
 
-| Variable          | Default                     | Description                                   |
-| ----------------- | --------------------------- | --------------------------------------------- |
-| `HOST`            | `127.0.0.1`                 | Backend bind host.                            |
-| `PORT`            | `8787`                      | Backend port.                                 |
-| `AUTH_TOKEN`      | empty                       | Token accepted by the HTTP API and WebSocket. |
-| `CONFIG_PATH`     | `data/config.json`          | Runtime config path override.                 |
-| `TERMRAIL_SHELL`  | `powershell.exe` on Windows | PTY shell override used by the server.        |
-| `VITE_AUTH_TOKEN` | empty                       | Frontend token for manual Vite startup.       |
+| Variable               | Default                     | Description                                   |
+| ---------------------- | --------------------------- | --------------------------------------------- |
+| `HOST`                 | `127.0.0.1`                 | Backend bind host.                            |
+| `PORT`                 | `8787`                      | Backend port.                                 |
+| `AUTH_TOKEN`           | empty                       | Token accepted by the HTTP API and WebSocket. |
+| `CONFIG_PATH`          | `data/config.json`          | Runtime config path override.                 |
+| `TERMRAIL_SHELL`       | `powershell.exe` on Windows | PTY shell override used by the server.        |
+| `TERMRAIL_WINDOWS_PTY` | `conpty` on Windows         | Windows PTY backend: `conpty` or `winpty`.    |
+| `VITE_AUTH_TOKEN`      | empty                       | Frontend token for manual Vite startup.       |
 
 When using `start.ps1`, setting `AUTH_TOKEN` is enough; the script mirrors it into `VITE_AUTH_TOKEN` before starting the UI.
+
+TermRail uses ConPTY on Windows and sends keyboard input through the Windows console API so Unicode input remains compatible with terminal applications such as Codex CLI. WinPTY remains available as a fallback through `TERMRAIL_WINDOWS_PTY=winpty`.
 
 ## Security Model
 
@@ -158,10 +165,9 @@ Common HTTP endpoints:
 | `POST`   | `/api/sessions`                                 |
 | `PATCH`  | `/api/sessions/:id`                             |
 | `DELETE` | `/api/sessions/:id`                             |
-| `POST`   | `/api/sessions/:id/start`                       |
-| `POST`   | `/api/sessions/:id/stop`                        |
 | `GET`    | `/api/sessions/:id/terminals`                   |
 | `POST`   | `/api/sessions/:id/terminals`                   |
+| `PATCH`  | `/api/sessions/:id/terminals/:terminalId`       |
 | `POST`   | `/api/sessions/:id/terminals/:terminalId/start` |
 | `POST`   | `/api/sessions/:id/terminals/:terminalId/stop`  |
 | `DELETE` | `/api/sessions/:id/terminals/:terminalId`       |
@@ -177,7 +183,7 @@ Client messages:
 {
   "type": "subscribe",
   "sessionId": "my-project-codex",
-  "terminalId": "main",
+  "terminalId": "codex",
   "includeBuffer": true
 }
 ```
@@ -186,7 +192,7 @@ Client messages:
 {
   "type": "input",
   "sessionId": "my-project-codex",
-  "terminalId": "main",
+  "terminalId": "codex",
   "data": "hello\r"
 }
 ```
@@ -195,7 +201,7 @@ Client messages:
 {
   "type": "resize",
   "sessionId": "my-project-codex",
-  "terminalId": "main",
+  "terminalId": "codex",
   "cols": 120,
   "rows": 32
 }
@@ -212,12 +218,13 @@ npm run dev
 Useful checks:
 
 ```powershell
+npm test
 npm run check
 npm run format:check
 npm run smoke --workspace server
 ```
 
-The smoke test starts a temporary backend on `127.0.0.1:8797`, loads `data/config.example.json`, subscribes over WebSocket, starts the safe `node -v` session, and verifies PTY output.
+The smoke test starts a temporary backend on `127.0.0.1:8797`, loads `data/config.example.json`, subscribes over WebSocket, and verifies PTY output and Unicode input.
 
 Project layout:
 
@@ -238,6 +245,7 @@ data/     Example config and local runtime config location
 - UI opens and sessions fail to load: confirm the backend is running on `127.0.0.1:8787`.
 - `node-pty` install errors on Windows: install Visual Studio C++ build tools or use a supported Node.js version.
 - Auth-enabled manual startup: set both `AUTH_TOKEN` and `VITE_AUTH_TOKEN` before running `npm start`.
+- Windows ConPTY startup issues: set `TERMRAIL_WINDOWS_PTY=winpty` and restart the backend.
 - TUI size mismatch after startup: use the **Fit** button in the terminal header.
 
 ## Roadmap

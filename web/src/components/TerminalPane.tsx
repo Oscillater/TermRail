@@ -2,6 +2,7 @@ import {
   type FormEvent,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -29,6 +30,11 @@ type TerminalDraft = {
   command: string;
 };
 
+type TerminalFormTarget = {
+  sessionId: string;
+  terminalId: string | null;
+};
+
 type TerminalPaneProps = {
   actionTerminalKey: string | null;
   connectionState: StreamConnectionState;
@@ -54,6 +60,11 @@ type TerminalPaneProps = {
   onSize: (size: TerminalSize) => void;
   onStartTerminal: (sessionId: string, terminalId: string) => void;
   onStopTerminal: (sessionId: string, terminalId: string) => void;
+  onUpdateTerminal: (
+    sessionId: string,
+    terminalId: string,
+    terminal: Pick<TerminalConfig, "name" | "command">,
+  ) => Promise<TerminalConfig>;
   output: TerminalOutputDelivery | null;
   session: SessionConfig | null;
   snapshot: TerminalSessionSnapshot | null;
@@ -80,6 +91,7 @@ export function TerminalPane({
   onSize,
   onStartTerminal,
   onStopTerminal,
+  onUpdateTerminal,
   output,
   session,
   snapshot,
@@ -93,15 +105,21 @@ export function TerminalPane({
   const activeSessionIdRef = useRef<string | null>(null);
   const activeTerminalIdRef = useRef<string | null>(null);
   const connectionStateRef = useRef<StreamConnectionState>(connectionState);
+  const terminalCommandInputRef = useRef<HTMLInputElement | null>(null);
+  const terminalFormOpenRef = useRef(false);
+  const terminalFormTargetRef = useRef<TerminalFormTarget | null>(null);
   const [terminalDraft, setTerminalDraft] = useState<TerminalDraft>({
     name: "",
     command: "",
   });
-  const [terminalFormOpen, setTerminalFormOpen] = useState(false);
   const [terminalFormError, setTerminalFormError] = useState<string | null>(
     null,
   );
   const [savingTerminal, setSavingTerminal] = useState(false);
+  const [terminalFormTarget, setTerminalFormTarget] =
+    useState<TerminalFormTarget | null>(null);
+  const terminalFormOpen = terminalFormTarget !== null;
+  const editingTerminalId = terminalFormTarget?.terminalId ?? null;
   const [deletingTerminalId, setDeletingTerminalId] = useState<string | null>(
     null,
   );
@@ -156,7 +174,9 @@ export function TerminalPane({
         }
         return false;
       }
-      terminalRef.current?.focus();
+      if (!terminalFormOpenRef.current) {
+        terminalRef.current?.focus();
+      }
       return true;
     },
     [onError, onInput],
@@ -337,24 +357,99 @@ export function TerminalPane({
     sendTerminalInput(inputRequest.data, true);
   }, [inputRequest, sendTerminalInput]);
 
+  useEffect(() => {
+    if (!terminalFormTarget) {
+      return;
+    }
+    if (
+      terminalFormTarget.sessionId !== session?.id ||
+      (terminalFormTarget.terminalId !== null &&
+        terminalFormTarget.terminalId !== terminal?.id)
+    ) {
+      terminalFormTargetRef.current = null;
+      setTerminalFormTarget(null);
+      setTerminalFormError(null);
+    }
+  }, [session?.id, terminal?.id, terminalFormTarget]);
+
+  useLayoutEffect(() => {
+    terminalFormOpenRef.current = terminalFormOpen;
+    const xterm = terminalRef.current;
+    if (!terminalFormOpen) {
+      if (xterm) {
+        xterm.options.disableStdin = false;
+      }
+      return undefined;
+    }
+
+    if (xterm) {
+      xterm.options.disableStdin = true;
+      xterm.blur();
+    }
+    const input = terminalCommandInputRef.current;
+    if (!savingTerminal && input && !input.disabled) {
+      input.focus({ preventScroll: true });
+      input.select();
+    }
+
+    return () => {
+      terminalFormOpenRef.current = false;
+      if (xterm) {
+        xterm.options.disableStdin = false;
+      }
+    };
+  }, [savingTerminal, terminalFormOpen]);
+
+  const focusTerminalOrForm = () => {
+    if (terminalFormOpen) {
+      terminalCommandInputRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    terminalRef.current?.focus();
+  };
+
   const openTerminalForm = () => {
+    if (!session) {
+      return;
+    }
     const nextIndex = (session?.terminals.length ?? 0) + 1;
     setTerminalDraft({
       name: `Terminal ${nextIndex}`,
-      command: terminal?.command ?? session?.command ?? "",
+      command: "",
     });
     setTerminalFormError(null);
-    setTerminalFormOpen(true);
+    const target = { sessionId: session.id, terminalId: null };
+    terminalFormTargetRef.current = target;
+    setTerminalFormTarget(target);
+  };
+
+  const openTerminalEditForm = () => {
+    if (!session || !terminal || status?.state === "running") {
+      return;
+    }
+    setTerminalDraft({
+      name: terminal.name,
+      command: terminal.command,
+    });
+    setTerminalFormError(null);
+    const target = {
+      sessionId: session.id,
+      terminalId: terminal.id,
+    };
+    terminalFormTargetRef.current = target;
+    setTerminalFormTarget(target);
   };
 
   const closeTerminalForm = () => {
-    setTerminalFormOpen(false);
+    terminalFormTargetRef.current = null;
+    setTerminalFormTarget(null);
     setTerminalFormError(null);
   };
 
   const handleTerminalSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!session) {
+    const formTarget = terminalFormTarget;
+    if (!formTarget) {
       return;
     }
 
@@ -370,12 +465,29 @@ export function TerminalPane({
     setSavingTerminal(true);
     setTerminalFormError(null);
     try {
-      await onCreateTerminal(session.id, nextTerminal);
-      closeTerminalForm();
+      if (formTarget.terminalId) {
+        await onUpdateTerminal(
+          formTarget.sessionId,
+          formTarget.terminalId,
+          nextTerminal,
+        );
+      } else {
+        await onCreateTerminal(formTarget.sessionId, nextTerminal);
+      }
+      if (terminalFormTargetRef.current === formTarget) {
+        closeTerminalForm();
+      }
     } catch (formError) {
-      setTerminalFormError(
-        messageFromError(formError, "Failed to create terminal"),
-      );
+      if (terminalFormTargetRef.current === formTarget) {
+        setTerminalFormError(
+          messageFromError(
+            formError,
+            formTarget.terminalId
+              ? "Failed to update terminal"
+              : "Failed to create terminal",
+          ),
+        );
+      }
     } finally {
       setSavingTerminal(false);
     }
@@ -456,6 +568,21 @@ export function TerminalPane({
           </button>
           <button
             className="ghost-button compact"
+            disabled={
+              !session ||
+              !terminal ||
+              running ||
+              activeActionBusy ||
+              savingTerminal ||
+              terminalFormOpen
+            }
+            onClick={openTerminalEditForm}
+            type="button"
+          >
+            Edit
+          </button>
+          <button
+            className="ghost-button compact"
             disabled={!session || !terminal}
             onClick={fitTerminal}
             title="Fit terminal size"
@@ -511,7 +638,7 @@ export function TerminalPane({
         <button
           aria-label="New terminal"
           className="terminal-tab-add"
-          disabled={!session}
+          disabled={!session || savingTerminal}
           onClick={openTerminalForm}
           type="button"
         >
@@ -522,6 +649,7 @@ export function TerminalPane({
       {terminalFormOpen ? (
         <form className="terminal-new-form" onSubmit={handleTerminalSubmit}>
           <input
+            autoFocus
             disabled={savingTerminal}
             onChange={(event) =>
               setTerminalDraft((current) => ({
@@ -542,6 +670,7 @@ export function TerminalPane({
               }))
             }
             placeholder="Command"
+            ref={terminalCommandInputRef}
             required
             value={terminalDraft.command}
           />
@@ -550,7 +679,13 @@ export function TerminalPane({
             disabled={savingTerminal}
             type="submit"
           >
-            {savingTerminal ? "Creating" : "Create"}
+            {savingTerminal
+              ? editingTerminalId
+                ? "Saving"
+                : "Creating"
+              : editingTerminalId
+                ? "Save"
+                : "Create"}
           </button>
           <button
             className="ghost-button compact"
@@ -567,17 +702,14 @@ export function TerminalPane({
       ) : null}
       {error ? <div className="error-banner">{error}</div> : null}
 
-      <div
-        className="terminal-frame"
-        onClick={() => terminalRef.current?.focus()}
-      >
+      <div className="terminal-frame" onClick={focusTerminalOrForm}>
         <div className="terminal-host" ref={containerRef} />
         {!terminal ? (
           <div className="terminal-empty-overlay">
             <h3>No terminal tabs</h3>
             <button
               className="primary-button"
-              disabled={!session}
+              disabled={!session || savingTerminal}
               onClick={(event) => {
                 event.stopPropagation();
                 openTerminalForm();

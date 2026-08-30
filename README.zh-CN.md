@@ -61,14 +61,14 @@ npm start
 
 ## 会话配置
 
-打开 UI 后点击 **Add**，创建一个会话。
+打开 UI 后点击 **Add** 创建会话。新会话默认没有终端标签页，需要再点击
+**New terminal** 添加要运行的命令。
 
 | 字段        | 说明                                                    |
 | ----------- | ------------------------------------------------------- |
 | `id`        | 稳定的会话 id，API 和 WebSocket 都会用到。              |
 | `name`      | 界面里显示的名称。                                      |
 | `cwd`       | 命令运行时使用的工作目录。                              |
-| `command`   | 默认命令；旧 start 接口和新建标签页都会使用它。         |
 | `terminals` | 这个会话下的终端标签页，每个标签页都有 id、名称和命令。 |
 | `prompts`   | 为兼容旧配置保留；当前界面使用全局 prompt library。     |
 
@@ -79,11 +79,10 @@ npm start
   "id": "my-project-codex",
   "name": "My Project Codex",
   "cwd": "D:\\Project\\my-project",
-  "command": "codex resume",
   "terminals": [
     {
-      "id": "main",
-      "name": "Main",
+      "id": "codex",
+      "name": "Codex",
       "command": "codex resume"
     },
     {
@@ -102,6 +101,10 @@ npm start
 
 运行时配置保存在 `data/config.json`。这个文件会被 Git 忽略，因为里面通常会包含本机路径和个人命令。
 
+旧配置里的 Session 级 `command` 会在读取时迁移。已有 Terminal 的命令优先；
+如果旧 Session 没有 Terminal 列表，则会用原命令生成一个 `Main` Terminal。
+下一次修改配置时，文件会按新格式写回。
+
 没有配置文件时，应用会自动创建空配置：
 
 ```json
@@ -119,16 +122,19 @@ Copy-Item data/config.example.json data/config.json
 
 ## 环境变量
 
-| 变量              | 默认值                        | 说明                                 |
-| ----------------- | ----------------------------- | ------------------------------------ |
-| `HOST`            | `127.0.0.1`                   | 后端监听地址。                       |
-| `PORT`            | `8787`                        | 后端端口。                           |
-| `AUTH_TOKEN`      | 空                            | HTTP API 和 WebSocket 使用的 token。 |
-| `CONFIG_PATH`     | `data/config.json`            | 自定义运行时配置文件路径。           |
-| `TERMRAIL_SHELL`  | Windows 上为 `powershell.exe` | 后端启动 PTY 时使用的 shell。        |
-| `VITE_AUTH_TOKEN` | 空                            | 手动启动 Vite 时前端使用的 token。   |
+| 变量                   | 默认值                        | 说明                                          |
+| ---------------------- | ----------------------------- | --------------------------------------------- |
+| `HOST`                 | `127.0.0.1`                   | 后端监听地址。                                |
+| `PORT`                 | `8787`                        | 后端端口。                                    |
+| `AUTH_TOKEN`           | 空                            | HTTP API 和 WebSocket 使用的 token。          |
+| `CONFIG_PATH`          | `data/config.json`            | 自定义运行时配置文件路径。                    |
+| `TERMRAIL_SHELL`       | Windows 上为 `powershell.exe` | 后端启动 PTY 时使用的 shell。                 |
+| `TERMRAIL_WINDOWS_PTY` | Windows 上为 `conpty`         | Windows PTY 后端，可选 `conpty` 或 `winpty`。 |
+| `VITE_AUTH_TOKEN`      | 空                            | 手动启动 Vite 时前端使用的 token。            |
 
 如果使用 `start.ps1`，只需要设置 `AUTH_TOKEN`。脚本会在启动 UI 前把它同步到 `VITE_AUTH_TOKEN`。
+
+Windows 上默认使用 ConPTY，并通过 Windows 控制台 API 发送按键，使 Codex CLI 等终端程序能够正常接收 Unicode 输入。若 ConPTY 无法启动，可以设置 `TERMRAIL_WINDOWS_PTY=winpty` 并重启后端。
 
 ## 安全说明
 
@@ -157,10 +163,9 @@ TermRail 会按保存的配置启动本地命令。能访问 TermRail，基本�
 | `POST`   | `/api/sessions`                                 |
 | `PATCH`  | `/api/sessions/:id`                             |
 | `DELETE` | `/api/sessions/:id`                             |
-| `POST`   | `/api/sessions/:id/start`                       |
-| `POST`   | `/api/sessions/:id/stop`                        |
 | `GET`    | `/api/sessions/:id/terminals`                   |
 | `POST`   | `/api/sessions/:id/terminals`                   |
+| `PATCH`  | `/api/sessions/:id/terminals/:terminalId`       |
 | `POST`   | `/api/sessions/:id/terminals/:terminalId/start` |
 | `POST`   | `/api/sessions/:id/terminals/:terminalId/stop`  |
 | `DELETE` | `/api/sessions/:id/terminals/:terminalId`       |
@@ -176,7 +181,7 @@ WebSocket 连接地址是 `/ws`。
 {
   "type": "subscribe",
   "sessionId": "my-project-codex",
-  "terminalId": "main",
+  "terminalId": "codex",
   "includeBuffer": true
 }
 ```
@@ -185,7 +190,7 @@ WebSocket 连接地址是 `/ws`。
 {
   "type": "input",
   "sessionId": "my-project-codex",
-  "terminalId": "main",
+  "terminalId": "codex",
   "data": "hello\r"
 }
 ```
@@ -194,7 +199,7 @@ WebSocket 连接地址是 `/ws`。
 {
   "type": "resize",
   "sessionId": "my-project-codex",
-  "terminalId": "main",
+  "terminalId": "codex",
   "cols": 120,
   "rows": 32
 }
@@ -211,12 +216,13 @@ npm run dev
 常用检查：
 
 ```powershell
+npm test
 npm run check
 npm run format:check
 npm run smoke --workspace server
 ```
 
-Smoke test 会在 `127.0.0.1:8797` 启动一个临时后端，加载 `data/config.example.json`，通过 WebSocket 订阅终端，启动 `node -v` 会话，并检查 PTY 输出。
+Smoke test 会在 `127.0.0.1:8797` 启动一个临时后端，加载 `data/config.example.json`，通过 WebSocket 订阅终端，并检查 PTY 输出和 Unicode 输入。
 
 项目结构：
 
@@ -237,6 +243,7 @@ data/     Example config and local runtime config location
 - UI 能打开，但会话加载失败：确认后端是否运行在 `127.0.0.1:8787`。
 - `node-pty` 安装失败：Windows 上安装 Visual Studio C++ build tools，或换用受支持的 Node.js 版本。
 - 手动启动且开启了认证：运行 `npm start` 前，同时设置 `AUTH_TOKEN` 和 `VITE_AUTH_TOKEN`。
+- Windows 上 ConPTY 无法启动：设置 `TERMRAIL_WINDOWS_PTY=winpty` 并重启后端。
 - TUI 尺寸不对：点击终端标题栏里的 **Fit**。
 
 ## 后续计划

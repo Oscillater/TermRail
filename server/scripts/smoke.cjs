@@ -15,6 +15,17 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForOutput(readOutput, expected, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (readOutput().includes(expected)) {
+      return true;
+    }
+    await wait(25);
+  }
+  return readOutput().includes(expected);
+}
+
 function waitForProcessClose(child, isClosed, timeoutMs) {
   if (isClosed()) {
     return Promise.resolve(true);
@@ -212,7 +223,7 @@ function runWebSocketCheck({
           }),
         );
         const response = await fetch(
-          `http://127.0.0.1:${port}/api/sessions/${targetSessionId}/start`,
+          `http://127.0.0.1:${port}/api/sessions/${targetSessionId}/terminals/${targetTerminalId}/start`,
           {
             method: "POST",
           },
@@ -281,63 +292,6 @@ function runWebSocketCheck({
   });
 }
 
-function readTerminalSnapshot(
-  targetSessionId,
-  targetTerminalId = mainTerminalId,
-) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
-    const timeout = setTimeout(() => {
-      ws.close();
-      reject(new Error("timeout waiting for terminal snapshot"));
-    }, 3000);
-
-    ws.on("open", () => {
-      ws.send(
-        JSON.stringify({
-          type: "subscribe",
-          sessionId: targetSessionId,
-          terminalId: targetTerminalId,
-          includeBuffer: true,
-        }),
-      );
-    });
-
-    ws.on("message", (data) => {
-      const message = JSON.parse(data.toString());
-      if (message.type === "error") {
-        clearTimeout(timeout);
-        ws.close();
-        reject(new Error(`snapshot failed: ${JSON.stringify(message.error)}`));
-        return;
-      }
-      if (message.type !== "subscribed") {
-        return;
-      }
-
-      clearTimeout(timeout);
-      ws.close();
-      if (
-        message.sessionId !== targetSessionId ||
-        message.terminalId !== targetTerminalId
-      ) {
-        reject(
-          new Error(
-            `snapshot returned ${message.sessionId}/${message.terminalId}`,
-          ),
-        );
-        return;
-      }
-      resolve(message);
-    });
-
-    ws.on("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-  });
-}
-
 async function readSession(targetSessionId = sessionId) {
   const response = await fetch(`http://127.0.0.1:${port}/api/sessions`);
   if (!response.ok) {
@@ -352,22 +306,11 @@ async function readSession(targetSessionId = sessionId) {
   return session;
 }
 
-function terminalsEqual(left, right) {
-  return (
-    left.length === right.length &&
-    left.every((terminal, index) => {
-      const other = right[index];
-      return (
-        other &&
-        terminal.id === other.id &&
-        terminal.name === other.name &&
-        terminal.command === other.command
-      );
-    })
-  );
-}
-
-function waitForTerminalText(terminalId, expectedText) {
+function waitForTerminalText(
+  terminalId,
+  expectedText,
+  targetSessionId = sessionId,
+) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
     let buffer = "";
@@ -394,7 +337,7 @@ function waitForTerminalText(terminalId, expectedText) {
       ws.send(
         JSON.stringify({
           type: "subscribe",
-          sessionId,
+          sessionId: targetSessionId,
           terminalId,
           includeBuffer: true,
         }),
@@ -514,6 +457,39 @@ async function runReadonlyTerminalsUpdateCheck() {
         `guard terminal status was ${JSON.stringify(listed.statuses[terminalId])}`,
       );
     }
+
+    const editResponse = await fetch(
+      `http://127.0.0.1:${port}/api/sessions/${sessionId}/terminals/${terminalId}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "Changed While Running",
+          command: "node -e \"console.log('must-not-run')\"",
+        }),
+      },
+    );
+    if (editResponse.status !== 409) {
+      throw new Error(`running terminal edit returned ${editResponse.status}`);
+    }
+    const editError = await editResponse.json();
+    if (editError.error?.code !== "TERMINAL_RUNNING") {
+      throw new Error(
+        `running terminal edit returned ${JSON.stringify(editError)}`,
+      );
+    }
+    const unchangedSession = await readSession();
+    const unchangedTerminal = unchangedSession.terminals.find(
+      (terminal) => terminal.id === terminalId,
+    );
+    if (
+      unchangedTerminal?.name !== created.terminal.name ||
+      unchangedTerminal.command !== created.terminal.command
+    ) {
+      throw new Error(
+        `running terminal edit changed config to ${JSON.stringify(unchangedTerminal)}`,
+      );
+    }
   } finally {
     if (terminalId) {
       const deleteResponse = await fetch(
@@ -529,53 +505,86 @@ async function runReadonlyTerminalsUpdateCheck() {
   }
 }
 
-async function runDefaultCommandUpdateCheck() {
+async function runTerminalUpdateCheck() {
   const session = await readSession();
-  const previousTerminals = session.terminals;
-  const updatedCommand = "node -e \"console.log('updated-main')\"";
+  const updatedCommand = "node -e \"console.log('updated-terminal')\"";
   const updateResponse = await fetch(
-    `http://127.0.0.1:${port}/api/sessions/${sessionId}`,
+    `http://127.0.0.1:${port}/api/sessions/${sessionId}/terminals/${mainTerminalId}`,
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        id: session.id,
-        name: session.name,
-        cwd: session.cwd,
+        name: "Updated Main",
         command: updatedCommand,
-        prompts: session.prompts,
       }),
     },
   );
   if (!updateResponse.ok) {
     throw new Error(
-      `update default command failed: ${updateResponse.status} ${await updateResponse.text()}`,
+      `update terminal failed: ${updateResponse.status} ${await updateResponse.text()}`,
     );
   }
 
   const updated = await updateResponse.json();
-  const mainTerminal = updated.session.terminals.find(
-    (terminal) => terminal.id === mainTerminalId,
-  );
-  if (mainTerminal?.command !== updatedCommand) {
-    throw new Error(
-      `main terminal command was ${JSON.stringify(mainTerminal?.command)}`,
-    );
+  if (
+    updated.terminal.command !== updatedCommand ||
+    updated.terminal.name !== "Updated Main"
+  ) {
+    throw new Error(`updated terminal was ${JSON.stringify(updated.terminal)}`);
   }
-  const otherTerminalsBefore = previousTerminals.filter(
-    (terminal) => terminal.id !== mainTerminalId,
-  );
-  const otherTerminalsAfter = updated.session.terminals.filter(
-    (terminal) => terminal.id !== mainTerminalId,
-  );
-  if (!terminalsEqual(otherTerminalsAfter, otherTerminalsBefore)) {
-    throw new Error("default command update changed non-main terminals");
+  if (Object.hasOwn(updated.session, "command")) {
+    throw new Error("updated session still exposed a command");
   }
 
   await runWebSocketCheck({
-    expectedDescription: "updated main command output",
-    expectedPattern: /updated-main/,
+    expectedDescription: "updated terminal command output",
+    expectedPattern: /updated-terminal/,
   });
+}
+
+function runMissingTerminalIdCheck() {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error("timeout waiting for missing terminal id error"));
+    }, 3000);
+
+    ws.on("open", () => {
+      ws.send(JSON.stringify({ type: "subscribe", sessionId }));
+    });
+    ws.on("message", (data) => {
+      const message = JSON.parse(data.toString());
+      if (message.type !== "error") {
+        return;
+      }
+      clearTimeout(timeout);
+      ws.close();
+      if (message.error?.code !== "INVALID_WS_MESSAGE") {
+        reject(
+          new Error(`missing terminal id returned ${JSON.stringify(message)}`),
+        );
+        return;
+      }
+      resolve();
+    });
+    ws.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+}
+
+async function runRemovedSessionActionsCheck() {
+  for (const action of ["start", "stop"]) {
+    const response = await fetch(
+      `http://127.0.0.1:${port}/api/sessions/${sessionId}/${action}`,
+      { method: "POST" },
+    );
+    if (response.status !== 404) {
+      throw new Error(`removed session ${action} returned ${response.status}`);
+    }
+  }
 }
 
 async function deleteSessionIfExists(targetSessionId) {
@@ -590,7 +599,7 @@ async function deleteSessionIfExists(targetSessionId) {
   }
 }
 
-async function createSmokeSession(targetSessionId, command) {
+async function createSmokeSession(targetSessionId) {
   const response = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -598,13 +607,38 @@ async function createSmokeSession(targetSessionId, command) {
       id: targetSessionId,
       name: "Delete Recreate Smoke",
       cwd: ".",
-      command,
       prompts: [],
     }),
   });
   if (!response.ok) {
     throw new Error(
       `create session ${targetSessionId} failed: ${response.status} ${await response.text()}`,
+    );
+  }
+  const created = await response.json();
+  if (
+    Object.hasOwn(created.session, "command") ||
+    created.session.terminals.length !== 0
+  ) {
+    throw new Error(
+      `new session was not empty: ${JSON.stringify(created.session)}`,
+    );
+  }
+  return created.session;
+}
+
+async function createSmokeTerminal(targetSessionId, command) {
+  const response = await fetch(
+    `http://127.0.0.1:${port}/api/sessions/${targetSessionId}/terminals`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Smoke Terminal", command }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `create terminal for ${targetSessionId} failed: ${response.status} ${await response.text()}`,
     );
   }
   return await response.json();
@@ -617,43 +651,33 @@ async function runDeleteRecreateSessionCleanupCheck() {
 
   await deleteSessionIfExists(targetSessionId);
   try {
-    await createSmokeSession(
+    await createSmokeSession(targetSessionId);
+    const oldTerminal = await createSmokeTerminal(
       targetSessionId,
       `node -e "console.log('${oldOutputText}')"`,
     );
-    await runWebSocketCheck({
-      expectedDescription: "old delete/recreate output",
-      expectedPattern: new RegExp(oldOutputText),
+    await waitForTerminalText(
+      oldTerminal.terminal.id,
+      oldOutputText,
       targetSessionId,
-    });
+    );
 
     await deleteSessionIfExists(targetSessionId);
-    await createSmokeSession(
+    await createSmokeSession(targetSessionId);
+    const recreatedSession = await readSession(targetSessionId);
+    if (recreatedSession.terminals.length !== 0) {
+      throw new Error("recreated session inherited deleted terminals");
+    }
+
+    const newTerminal = await createSmokeTerminal(
       targetSessionId,
       `node -e "console.log('${newOutputText}')"`,
     );
-
-    const snapshot = await readTerminalSnapshot(targetSessionId);
-    if (snapshot.buffer !== "") {
-      throw new Error(
-        `recreated session inherited ${snapshot.buffer.length} stale buffer chars`,
-      );
-    }
-    if (
-      snapshot.status.state !== "stopped" ||
-      snapshot.status.startedAt !== null ||
-      snapshot.status.bufferLength !== 0
-    ) {
-      throw new Error(
-        `recreated session status was ${JSON.stringify(snapshot.status)}`,
-      );
-    }
-
-    const newOutput = await runWebSocketCheck({
-      expectedDescription: "new delete/recreate output",
-      expectedPattern: new RegExp(newOutputText),
+    const newOutput = await waitForTerminalText(
+      newTerminal.terminal.id,
+      newOutputText,
       targetSessionId,
-    });
+    );
     if (newOutput.includes(oldOutputText)) {
       throw new Error("recreated session output included deleted session text");
     }
@@ -712,6 +736,340 @@ async function runSecondTerminalCheck() {
   }
 }
 
+async function stopTerminal(terminalId) {
+  const response = await fetch(
+    `http://127.0.0.1:${port}/api/sessions/${sessionId}/terminals/${terminalId}/stop`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `stop terminal failed: ${response.status} ${await response.text()}`,
+    );
+  }
+}
+
+async function deleteTerminal(terminalId) {
+  const response = await fetch(
+    `http://127.0.0.1:${port}/api/sessions/${sessionId}/terminals/${terminalId}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `delete terminal failed: ${response.status} ${await response.text()}`,
+    );
+  }
+}
+
+async function runConcurrentStartCheck() {
+  const created = await createSmokeTerminal(
+    sessionId,
+    `node -e "setInterval(()=>{},1000)"`,
+  );
+  const terminalId = created.terminal.id;
+
+  try {
+    await stopTerminal(terminalId);
+    const startUrl = `http://127.0.0.1:${port}/api/sessions/${sessionId}/terminals/${terminalId}/start`;
+    const responses = await Promise.all([
+      fetch(startUrl, { method: "POST" }),
+      fetch(startUrl, { method: "POST" }),
+    ]);
+    const statuses = responses.map((response) => response.status).sort();
+    if (statuses[0] !== 200 || statuses[1] !== 409) {
+      throw new Error(
+        `concurrent starts returned ${responses.map((response) => response.status).join(", ")}`,
+      );
+    }
+
+    const conflict = responses.find((response) => response.status === 409);
+    const body = await conflict.json();
+    if (body.error?.code !== "TERMINAL_RUNNING") {
+      throw new Error(`concurrent start returned ${JSON.stringify(body)}`);
+    }
+  } finally {
+    await deleteTerminal(terminalId);
+  }
+}
+
+async function runConcurrentUpdateStartCheck() {
+  const oldMarker = "concurrent-command-old";
+  const newMarker = "concurrent-command-new";
+  const oldCommand = `node -e "console.log('${oldMarker}');setInterval(()=>{},1000)"`;
+  const newCommand = `node -e "console.log('${newMarker}');setInterval(()=>{},1000)"`;
+  const created = await createSmokeTerminal(sessionId, oldCommand);
+  const terminalId = created.terminal.id;
+
+  try {
+    await stopTerminal(terminalId);
+    const terminalUrl = `http://127.0.0.1:${port}/api/sessions/${sessionId}/terminals/${terminalId}`;
+    const [updateResponse, startResponse] = await Promise.all([
+      fetch(terminalUrl, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "Concurrent Update",
+          command: newCommand,
+        }),
+      }),
+      fetch(`${terminalUrl}/start`, { method: "POST" }),
+    ]);
+
+    if (!startResponse.ok) {
+      throw new Error(
+        `concurrent start failed: ${startResponse.status} ${await startResponse.text()}`,
+      );
+    }
+
+    let expectedCommand;
+    let expectedMarker;
+    if (updateResponse.ok) {
+      expectedCommand = newCommand;
+      expectedMarker = newMarker;
+    } else {
+      const body = await updateResponse.json();
+      if (
+        updateResponse.status !== 409 ||
+        body.error?.code !== "TERMINAL_RUNNING"
+      ) {
+        throw new Error(
+          `concurrent update returned ${updateResponse.status} ${JSON.stringify(body)}`,
+        );
+      }
+      expectedCommand = oldCommand;
+      expectedMarker = oldMarker;
+    }
+
+    await waitForTerminalText(terminalId, expectedMarker);
+    const session = await readSession();
+    const terminal = session.terminals.find((item) => item.id === terminalId);
+    if (terminal?.command !== expectedCommand) {
+      throw new Error(
+        `running command and saved command diverged: ${JSON.stringify(terminal)}`,
+      );
+    }
+  } finally {
+    await deleteTerminal(terminalId);
+  }
+}
+
+async function runBracketedPasteCheck() {
+  const paste = "\x1b[200~first line\rsecond 中文行\x1b[201~";
+  const expectedMarker = `PASTE_HEX:${Buffer.from(paste, "utf8").toString("hex")}`;
+  const command =
+    "node -e \"let b=Buffer.alloc(0);process.stdin.setRawMode(true);process.stdin.on('data',d=>{b=Buffer.concat([b,d]);if(b.includes(Buffer.from('\\x1b[201~'))){console.log('PASTE_HEX:'+b.toString('hex'));process.exit(0)}});console.log('paste-ready')\"";
+  const created = await createSmokeTerminal(sessionId, command);
+  const terminalId = created.terminal.id;
+
+  try {
+    await new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+      let buffer = "";
+      let sent = false;
+      const timeout = setTimeout(() => {
+        ws.close();
+        reject(
+          new Error(
+            `timeout waiting for bracketed paste marker; buffer=${JSON.stringify(buffer)}`,
+          ),
+        );
+      }, 5000);
+
+      const inspectBuffer = () => {
+        if (!sent && buffer.includes("paste-ready")) {
+          sent = true;
+          ws.send(
+            JSON.stringify({
+              type: "input",
+              sessionId,
+              terminalId,
+              data: paste,
+            }),
+          );
+        }
+        if (!buffer.includes(expectedMarker)) {
+          return false;
+        }
+        clearTimeout(timeout);
+        ws.close();
+        resolve();
+        return true;
+      };
+
+      ws.on("open", () => {
+        ws.send(
+          JSON.stringify({
+            type: "subscribe",
+            sessionId,
+            terminalId,
+            includeBuffer: true,
+          }),
+        );
+      });
+      ws.on("message", (data) => {
+        const message = JSON.parse(data.toString());
+        if (message.type === "subscribed") {
+          buffer += message.buffer;
+          inspectBuffer();
+        }
+        if (message.type === "terminal.output") {
+          buffer += message.data;
+          inspectBuffer();
+        }
+        if (
+          message.type === "terminal.status" &&
+          message.terminalId === terminalId &&
+          message.status.state === "stopped" &&
+          !inspectBuffer()
+        ) {
+          clearTimeout(timeout);
+          ws.close();
+          reject(
+            new Error(
+              `bracketed paste terminal stopped before marker; buffer=${JSON.stringify(buffer)}`,
+            ),
+          );
+        }
+      });
+      ws.on("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+    });
+  } finally {
+    await deleteTerminal(terminalId);
+  }
+}
+
+async function runUnicodeInputCheck() {
+  const repeatedPunctuation = "\u201d\u201d";
+  const input = '中文输入、……——“”‘’/^ - "';
+  const expectedMarker = `UNICODE_HEX:${Buffer.from(input, "utf8").toString("hex")}`;
+  const command =
+    "node -e \"process.stdin.setEncoding('utf8');process.stdin.once('data',data=>{console.log('UNICODE_HEX:'+Buffer.from(data.trim(),'utf8').toString('hex'));process.exit(0)});console.log('unicode-ready')\"";
+
+  const createResponse = await fetch(
+    `http://127.0.0.1:${port}/api/sessions/${sessionId}/terminals`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Unicode Input", command }),
+    },
+  );
+  if (!createResponse.ok) {
+    throw new Error(
+      `create Unicode terminal failed: ${createResponse.status} ${await createResponse.text()}`,
+    );
+  }
+
+  const created = await createResponse.json();
+  const terminalId = created.terminal.id;
+
+  try {
+    await new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+      let buffer = "";
+      let inputSent = false;
+      let inputSubmitted = false;
+      const timeout = setTimeout(() => {
+        ws.close();
+        reject(
+          new Error(
+            `timeout waiting for Unicode input marker; buffer=${JSON.stringify(buffer)}`,
+          ),
+        );
+      }, 8000);
+
+      const inspectBuffer = () => {
+        if (!inputSent && buffer.includes("unicode-ready")) {
+          inputSent = true;
+          ws.send(
+            JSON.stringify({
+              type: "input",
+              sessionId,
+              terminalId,
+              data: repeatedPunctuation,
+            }),
+          );
+        }
+        if (
+          inputSent &&
+          !inputSubmitted &&
+          buffer.includes(repeatedPunctuation)
+        ) {
+          inputSubmitted = true;
+          ws.send(
+            JSON.stringify({
+              type: "input",
+              sessionId,
+              terminalId,
+              data: `\x7f\x7f${input}\r`,
+            }),
+          );
+        }
+        if (buffer.includes(expectedMarker)) {
+          clearTimeout(timeout);
+          ws.close();
+          resolve();
+          return true;
+        }
+        return false;
+      };
+
+      ws.on("open", () => {
+        ws.send(
+          JSON.stringify({
+            type: "subscribe",
+            sessionId,
+            terminalId,
+            includeBuffer: true,
+          }),
+        );
+      });
+
+      ws.on("message", (data) => {
+        const message = JSON.parse(data.toString());
+        if (message.type === "subscribed") {
+          buffer += message.buffer;
+          inspectBuffer();
+        }
+        if (message.type === "terminal.output") {
+          buffer += message.data;
+          inspectBuffer();
+        }
+        if (
+          message.type === "terminal.status" &&
+          message.terminalId === terminalId &&
+          message.status.state === "stopped" &&
+          !inspectBuffer()
+        ) {
+          clearTimeout(timeout);
+          ws.close();
+          reject(
+            new Error(
+              `Unicode terminal stopped before marker; buffer=${JSON.stringify(buffer)}`,
+            ),
+          );
+        }
+      });
+
+      ws.on("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+    });
+  } finally {
+    const deleteResponse = await fetch(
+      `http://127.0.0.1:${port}/api/sessions/${sessionId}/terminals/${terminalId}`,
+      { method: "DELETE" },
+    );
+    if (!deleteResponse.ok) {
+      throw new Error(
+        `delete Unicode terminal failed: ${deleteResponse.status} ${await deleteResponse.text()}`,
+      );
+    }
+  }
+}
+
 async function main() {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "termrail-smoke-"));
   const configPath = path.join(tempDir, "config.json");
@@ -723,6 +1081,7 @@ async function main() {
       ...process.env,
       PORT: String(port),
       CONFIG_PATH: configPath,
+      TERMRAIL_WINDOWS_PTY: "",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -742,15 +1101,44 @@ async function main() {
 
   try {
     await waitForHealth();
+    if (
+      process.platform === "win32" &&
+      !serverStdout.includes("[server] PTY backend: conpty")
+    ) {
+      throw new Error(
+        `server did not select the default ConPTY backend; stdout=${JSON.stringify(serverStdout)}`,
+      );
+    }
     const response = await fetch(`http://127.0.0.1:${port}/api/sessions`);
     if (!response.ok) {
       throw new Error(`list sessions failed: ${response.status}`);
     }
+    const listed = await response.json();
+    if (listed.sessions.some((item) => Object.hasOwn(item, "command"))) {
+      throw new Error("session list still exposed session commands");
+    }
     const output = await runWebSocketCheck();
     await runNoBufferSubscriptionCheck();
+    await runMissingTerminalIdCheck();
+    await runRemovedSessionActionsCheck();
     await runSecondTerminalCheck();
+    await runConcurrentStartCheck();
+    await runConcurrentUpdateStartCheck();
+    await runBracketedPasteCheck();
+    await runUnicodeInputCheck();
+    if (
+      process.platform === "win32" &&
+      !(await waitForOutput(
+        () => serverStdout,
+        "[server] Windows console input helper acknowledged input",
+      ))
+    ) {
+      throw new Error(
+        `Windows console input helper did not acknowledge smoke input; stdout=${JSON.stringify(serverStdout)} stderr=${JSON.stringify(serverStderr)}`,
+      );
+    }
     await runReadonlyTerminalsUpdateCheck();
-    await runDefaultCommandUpdateCheck();
+    await runTerminalUpdateCheck();
     await runDeleteRecreateSessionCleanupCheck();
     console.log(`smoke ok: ${sessionId} output ${JSON.stringify(output)}`);
   } finally {

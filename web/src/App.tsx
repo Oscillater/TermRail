@@ -66,7 +66,8 @@ export function App() {
   return (
     <main className={appShellClassName}>
       <SessionPanel
-        actionSessionId={app.actionSessionId}
+        actionTerminalKey={app.actionTerminalKey}
+        activeTerminalIds={app.activeTerminalIds}
         collapsed={collapsedPanels.sessions}
         error={app.sessionError}
         loading={app.loading}
@@ -75,8 +76,12 @@ export function App() {
         onEditSession={app.updateSession}
         onRefresh={app.loadSessions}
         onSelect={app.selectSession}
-        onStart={(sessionId) => void app.runAction(sessionId, "start")}
-        onStop={(sessionId) => void app.runAction(sessionId, "stop")}
+        onStart={(sessionId, terminalId) =>
+          void app.runTerminalAction(sessionId, terminalId, "start")
+        }
+        onStop={(sessionId, terminalId) =>
+          void app.runTerminalAction(sessionId, terminalId, "stop")
+        }
         onToggleCollapsed={() =>
           setCollapsedPanels((current) => ({
             ...current,
@@ -87,6 +92,7 @@ export function App() {
         selectedSessionId={app.selectedSessionId}
         sessions={app.sessions}
         statuses={app.statuses}
+        terminalStatuses={app.terminalStatuses}
       />
       <TerminalPane
         actionTerminalKey={app.actionTerminalKey}
@@ -106,6 +112,7 @@ export function App() {
         onStopTerminal={(sessionId, terminalId) =>
           void app.runTerminalAction(sessionId, terminalId, "stop")
         }
+        onUpdateTerminal={app.updateTerminal}
         output={app.terminalOutput}
         session={app.selectedSession}
         snapshot={app.terminalSnapshot}

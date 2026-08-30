@@ -95,15 +95,6 @@ export function SessionForm({
           value={draft.cwd}
         />
       ) : null}
-      <label>
-        <span>Default Command</span>
-        <input
-          disabled={saving}
-          onChange={(event) => onChange("command", event.target.value)}
-          required
-          value={draft.command}
-        />
-      </label>
       <div className="form-actions">
         <button className="primary-button" disabled={saving} type="submit">
           {saving ? "Saving" : "Save"}

@@ -1,11 +1,7 @@
 import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  defaultTerminalId,
-  terminalSizeLimits,
-  type TerminalSize,
-} from "@termrail/shared";
+import { terminalSizeLimits, type TerminalSize } from "@termrail/shared";
 import express, {
   type NextFunction,
   type Request,
@@ -15,7 +11,9 @@ import { authMiddleware } from "./auth.js";
 import { ConfigStore } from "./configStore.js";
 import { HttpError } from "./errors.js";
 import { listDirectoryRoots, listSubdirectories } from "./filesystem.js";
+import { resolvePtyBackend } from "./ptyBackend.js";
 import { SessionManager } from "./sessionManager.js";
+import { SessionOperationQueue } from "./sessionOperationQueue.js";
 import type { SessionConfig, TerminalConfig } from "./types.js";
 import { attachWebSocketServer } from "./ws.js";
 
@@ -29,13 +27,13 @@ const host = process.env.HOST || "127.0.0.1";
 const port = Number.parseInt(process.env.PORT || "8787", 10);
 const authToken = process.env.AUTH_TOKEN?.trim() ?? "";
 
-function asyncRoute(
-  handler: (
-    request: Request,
-    response: Response,
-    next: NextFunction,
-  ) => Promise<void>,
-) {
+type AsyncRouteHandler = (
+  request: Request,
+  response: Response,
+  next: NextFunction,
+) => Promise<void>;
+
+function asyncRoute(handler: AsyncRouteHandler) {
   return (request: Request, response: Response, next: NextFunction) => {
     handler(request, response, next).catch(next);
   };
@@ -83,11 +81,25 @@ function optionalStartSize(value: unknown): TerminalSize | undefined {
 
 async function main(): Promise<void> {
   validatePort(port);
+  const ptyBackend = resolvePtyBackend(
+    process.platform,
+    process.env.TERMRAIL_WINDOWS_PTY,
+  );
 
   const configStore = new ConfigStore(configPath);
   await configStore.load();
 
-  const sessionManager = new SessionManager(projectRoot);
+  const sessionManager = new SessionManager(projectRoot, {
+    useConpty: ptyBackend.useConpty,
+    useWindowsConsoleInput: ptyBackend.useWindowsConsoleInput,
+  });
+  const sessionOperations = new SessionOperationQueue();
+  const serializedSessionRoute = (handler: AsyncRouteHandler) =>
+    asyncRoute(async (request, response, next) => {
+      await sessionOperations.run(request.params.id, () =>
+        handler(request, response, next),
+      );
+    });
   const app = express();
   app.use(express.json({ limit: "1mb" }));
 
@@ -188,7 +200,7 @@ async function main(): Promise<void> {
 
   app.patch(
     "/api/sessions/:id",
-    asyncRoute(async (request, response) => {
+    serializedSessionRoute(async (request, response) => {
       const session = await configStore.updateSession(
         request.params.id,
         request.body,
@@ -199,7 +211,7 @@ async function main(): Promise<void> {
 
   app.put(
     "/api/sessions/:id",
-    asyncRoute(async (request, response) => {
+    serializedSessionRoute(async (request, response) => {
       const session = await configStore.updateSession(
         request.params.id,
         request.body,
@@ -210,7 +222,7 @@ async function main(): Promise<void> {
 
   app.delete(
     "/api/sessions/:id",
-    asyncRoute(async (request, response) => {
+    serializedSessionRoute(async (request, response) => {
       const existing = getSessionOrThrow(request.params.id);
       await sessionManager.deleteSessionRuntime(existing.id);
       const session = await configStore.deleteSession(existing.id);
@@ -231,7 +243,7 @@ async function main(): Promise<void> {
 
   app.post(
     "/api/sessions/:id/terminals",
-    asyncRoute(async (request, response) => {
+    serializedSessionRoute(async (request, response) => {
       const session = getSessionOrThrow(request.params.id);
       const terminal = await configStore.createTerminal(
         session.id,
@@ -261,9 +273,39 @@ async function main(): Promise<void> {
     }),
   );
 
+  app.patch(
+    "/api/sessions/:id/terminals/:terminalId",
+    serializedSessionRoute(async (request, response) => {
+      const session = getSessionOrThrow(request.params.id);
+      const terminal = getTerminalOrThrow(session, request.params.terminalId);
+      if (
+        sessionManager.getStatus(session.id, terminal.id).state === "running"
+      ) {
+        throw new HttpError(
+          409,
+          "TERMINAL_RUNNING",
+          `Stop terminal "${terminal.id}" before editing it`,
+        );
+      }
+
+      const updatedTerminal = await configStore.updateTerminal(
+        session.id,
+        terminal.id,
+        request.body,
+      );
+      const updatedSession = getSessionOrThrow(session.id);
+      response.json({
+        session: updatedSession,
+        terminal: updatedTerminal,
+        status: sessionManager.getStatus(session.id, terminal.id),
+        sessionStatus: sessionManager.getSessionStatus(updatedSession),
+      });
+    }),
+  );
+
   app.post(
     "/api/sessions/:id/terminals/:terminalId/start",
-    asyncRoute(async (request, response) => {
+    serializedSessionRoute(async (request, response) => {
       const session = getSessionOrThrow(request.params.id);
       const terminal = getTerminalOrThrow(session, request.params.terminalId);
       const status = await sessionManager.start(
@@ -280,7 +322,7 @@ async function main(): Promise<void> {
 
   app.post(
     "/api/sessions/:id/terminals/:terminalId/stop",
-    asyncRoute(async (request, response) => {
+    serializedSessionRoute(async (request, response) => {
       const session = getSessionOrThrow(request.params.id);
       getTerminalOrThrow(session, request.params.terminalId);
       const status = await sessionManager.stop(
@@ -296,15 +338,14 @@ async function main(): Promise<void> {
 
   app.delete(
     "/api/sessions/:id/terminals/:terminalId",
-    asyncRoute(async (request, response) => {
+    serializedSessionRoute(async (request, response) => {
       const session = getSessionOrThrow(request.params.id);
       getTerminalOrThrow(session, request.params.terminalId);
-      await sessionManager.stop(session.id, request.params.terminalId);
-      const terminal = await configStore.deleteTerminal(
+      await sessionManager.deleteTerminalRuntime(
         session.id,
         request.params.terminalId,
       );
-      sessionManager.deleteTerminalRuntime(
+      const terminal = await configStore.deleteTerminal(
         session.id,
         request.params.terminalId,
       );
@@ -313,35 +354,6 @@ async function main(): Promise<void> {
         session: updatedSession,
         terminal,
         sessionStatus: sessionManager.getSessionStatus(updatedSession),
-      });
-    }),
-  );
-
-  app.post(
-    "/api/sessions/:id/start",
-    asyncRoute(async (request, response) => {
-      const session = getSessionOrThrow(request.params.id);
-      const terminal = getTerminalOrThrow(session, defaultTerminalId);
-      const terminalStatus = await sessionManager.start(
-        session,
-        terminal,
-        optionalStartSize(request.body),
-      );
-      response.json({
-        status: sessionManager.getSessionStatus(session),
-        terminalStatus,
-      });
-    }),
-  );
-
-  app.post(
-    "/api/sessions/:id/stop",
-    asyncRoute(async (request, response) => {
-      const session = getSessionOrThrow(request.params.id);
-      await sessionManager.stopSession(session.id);
-      response.json({
-        status: sessionManager.getSessionStatus(session),
-        terminalStatuses: sessionManager.getTerminalStatuses(session),
       });
     }),
   );
@@ -395,6 +407,9 @@ async function main(): Promise<void> {
   httpServer.listen(port, host, () => {
     console.log(`[server] listening on http://${host}:${port}`);
     console.log(`[server] config path: ${configPath}`);
+    if (process.platform === "win32") {
+      console.log(`[server] PTY backend: ${ptyBackend.backend}`);
+    }
     if (authToken) {
       console.log("[server] AUTH_TOKEN is enabled");
     }

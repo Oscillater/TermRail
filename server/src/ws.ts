@@ -1,9 +1,5 @@
 import type { Server } from "node:http";
-import {
-  defaultTerminalId,
-  terminalSizeLimits,
-  type WsClientMessage,
-} from "@termrail/shared";
+import { terminalSizeLimits, type WsClientMessage } from "@termrail/shared";
 import { WebSocket, WebSocketServer } from "ws";
 import { isAuthorized } from "./auth.js";
 import type { ConfigStore } from "./configStore.js";
@@ -36,19 +32,18 @@ function parseClientMessage(raw: WebSocket.RawData): ClientMessage {
   if (
     !isRecord(parsed) ||
     typeof parsed.type !== "string" ||
-    typeof parsed.sessionId !== "string"
+    typeof parsed.sessionId !== "string" ||
+    typeof parsed.terminalId !== "string" ||
+    !parsed.terminalId
   ) {
     throw new HttpError(
       400,
       "INVALID_WS_MESSAGE",
-      "WebSocket message must include type and sessionId",
+      "WebSocket message must include type, sessionId, and terminalId",
     );
   }
 
-  const terminalId =
-    typeof parsed.terminalId === "string"
-      ? parsed.terminalId
-      : defaultTerminalId;
+  const terminalId = parsed.terminalId;
 
   switch (parsed.type) {
     case "subscribe":

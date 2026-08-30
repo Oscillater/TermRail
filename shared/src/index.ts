@@ -14,7 +14,6 @@ export type SessionConfig = {
   id: string;
   name: string;
   cwd: string;
-  command: string;
   terminals: TerminalConfig[];
   prompts: PromptExample[];
 };
@@ -55,15 +54,15 @@ export type WsClientMessage =
   | {
       type: "subscribe";
       sessionId: string;
-      terminalId?: string;
+      terminalId: string;
       includeBuffer?: boolean;
     }
-  | { type: "unsubscribe"; sessionId: string; terminalId?: string }
-  | { type: "input"; sessionId: string; terminalId?: string; data: string }
+  | { type: "unsubscribe"; sessionId: string; terminalId: string }
+  | { type: "input"; sessionId: string; terminalId: string; data: string }
   | {
       type: "resize";
       sessionId: string;
-      terminalId?: string;
+      terminalId: string;
       cols: number;
       rows: number;
     };
@@ -96,8 +95,6 @@ export type WsServerMessage =
       type: "error";
       error: { code: string; message: string; details?: unknown };
     };
-
-export const defaultTerminalId = "main";
 
 export const idPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 

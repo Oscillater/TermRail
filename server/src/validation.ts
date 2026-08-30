@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { defaultTerminalId, idPattern } from "@termrail/shared";
+import { idPattern } from "@termrail/shared";
 import type {
   AppConfig,
   PromptExample,
@@ -141,7 +141,6 @@ function parseTerminals(
 export function terminalFromInput(
   value: unknown,
   options: {
-    defaultCommand?: string;
     generateId?: boolean;
     id?: string;
   } = {},
@@ -166,7 +165,7 @@ export function terminalFromInput(
   }
 
   const name = cleanString(record.name);
-  const command = cleanString(record.command) ?? options.defaultCommand ?? null;
+  const command = cleanString(record.command);
 
   if (!name) {
     errors.push("name must be a non-empty string");
@@ -224,7 +223,11 @@ function collectLegacyPrompts(sessions: SessionConfig[]): PromptExample[] {
 
 export function sessionFromInput(
   value: unknown,
-  options: { id?: string; generateId?: boolean } = {},
+  options: {
+    id?: string;
+    generateId?: boolean;
+    migrateLegacyCommand?: boolean;
+  } = {},
 ): SessionConfig {
   const errors: string[] = [];
   const record = asRecord(value);
@@ -247,18 +250,17 @@ export function sessionFromInput(
 
   const name = cleanString(record.name);
   const cwd = cleanString(record.cwd);
-  const command = cleanString(record.command);
   const promptsValue = record.prompts ?? [];
-  const terminalsValue =
-    record.terminals === undefined
-      ? [
-          {
-            id: defaultTerminalId,
-            name: "Main",
-            command: command ?? "",
-          },
-        ]
-      : record.terminals;
+  const legacyCommand = options.migrateLegacyCommand
+    ? cleanString(record.command)
+    : null;
+  const shouldMigrateLegacyCommand =
+    legacyCommand !== null &&
+    (record.terminals == null ||
+      (Array.isArray(record.terminals) && record.terminals.length === 0));
+  const terminalsValue = shouldMigrateLegacyCommand
+    ? [{ id: "main", name: "Main", command: legacyCommand }]
+    : (record.terminals ?? []);
 
   if (!name) {
     errors.push("name must be a non-empty string");
@@ -266,14 +268,10 @@ export function sessionFromInput(
   if (!cwd) {
     errors.push("cwd must be a non-empty string");
   }
-  if (!command) {
-    errors.push("command must be a non-empty string");
-  }
-
   const prompts = parsePrompts(promptsValue, errors);
   const terminals = parseTerminals(terminalsValue, errors);
 
-  if (errors.length > 0 || !id || !name || !cwd || !command) {
+  if (errors.length > 0 || !id || !name || !cwd) {
     throw new HttpError(
       400,
       "INVALID_SESSION",
@@ -282,7 +280,7 @@ export function sessionFromInput(
     );
   }
 
-  return { id, name, cwd, command, terminals, prompts };
+  return { id, name, cwd, terminals, prompts };
 }
 
 export function sessionsFromConfig(value: unknown): {
@@ -304,7 +302,23 @@ export function sessionsFromConfig(value: unknown): {
 
   record.sessions.forEach((item, index) => {
     try {
-      const session = sessionFromInput(item);
+      const session = sessionFromInput(item, { migrateLegacyCommand: true });
+      const itemRecord = asRecord(item);
+      if (itemRecord && "command" in itemRecord) {
+        const legacyCommand = cleanString(itemRecord.command);
+        const migrated =
+          legacyCommand !== null &&
+          (itemRecord.terminals == null ||
+            (Array.isArray(itemRecord.terminals) &&
+              itemRecord.terminals.length === 0));
+        warnings.push(
+          migrated
+            ? `sessions[${index}].command is deprecated and was migrated to a Main terminal`
+            : legacyCommand === null
+              ? `sessions[${index}].command is deprecated and was ignored because it is empty`
+              : `sessions[${index}].command is deprecated and was ignored because terminals are already configured`,
+        );
+      }
       if (seen.has(session.id)) {
         warnings.push(
           `sessions[${index}] skipped: duplicate id "${session.id}"`,

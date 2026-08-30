@@ -1,6 +1,5 @@
 import { dirname } from "node:path";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { defaultTerminalId } from "@termrail/shared";
 import type {
   AppConfig,
   PromptExample,
@@ -29,38 +28,6 @@ function cloneSession(session: SessionConfig): SessionConfig {
     terminals: cloneTerminals(session.terminals),
     prompts: clonePrompts(session.prompts),
   };
-}
-
-function terminalsEqual(
-  left: TerminalConfig[],
-  right: TerminalConfig[],
-): boolean {
-  return (
-    left.length === right.length &&
-    left.every((terminal, index) => {
-      const other = right[index];
-      if (!other) {
-        return false;
-      }
-      return (
-        terminal.id === other.id &&
-        terminal.name === other.name &&
-        terminal.command === other.command
-      );
-    })
-  );
-}
-
-function syncDefaultTerminalCommand(
-  terminals: TerminalConfig[],
-  previousCommand: string,
-  nextCommand: string,
-): TerminalConfig[] {
-  return terminals.map((terminal) =>
-    terminal.id === defaultTerminalId && terminal.command === previousCommand
-      ? { ...terminal, command: nextCommand }
-      : { ...terminal },
-  );
 }
 
 export class ConfigStore {
@@ -141,6 +108,28 @@ export class ConfigStore {
   }
 
   async createSession(input: unknown): Promise<SessionConfig> {
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new HttpError(
+        400,
+        "INVALID_SESSION",
+        "Session must be a JSON object",
+      );
+    }
+    const request = input as Record<string, unknown>;
+    if ("command" in request) {
+      throw new HttpError(
+        400,
+        "INVALID_SESSION",
+        "Session commands are not supported; create a terminal instead",
+      );
+    }
+    if ("terminals" in request) {
+      throw new HttpError(
+        400,
+        "TERMINALS_READ_ONLY",
+        "Session terminals must be managed through the terminal endpoints",
+      );
+    }
     const session = sessionFromInput(input, { generateId: true });
     return await this.updateConfig(() => {
       if (this.config.sessions.some((item) => item.id === session.id)) {
@@ -172,6 +161,20 @@ export class ConfigStore {
         "Session id cannot be changed",
       );
     }
+    if ("command" in patch) {
+      throw new HttpError(
+        400,
+        "INVALID_SESSION",
+        "Session commands are not supported; edit the terminal instead",
+      );
+    }
+    if ("terminals" in patch) {
+      throw new HttpError(
+        400,
+        "TERMINALS_READ_ONLY",
+        "Session terminals must be managed through the terminal endpoints",
+      );
+    }
 
     return await this.updateConfig(() => {
       const index = this.config.sessions.findIndex(
@@ -187,27 +190,8 @@ export class ConfigStore {
 
       const current = this.config.sessions[index];
       const parsed = sessionFromInput({ ...current, ...patch, id }, { id });
-      if (
-        "terminals" in patch &&
-        !terminalsEqual(parsed.terminals, current.terminals)
-      ) {
-        throw new HttpError(
-          400,
-          "TERMINALS_READ_ONLY",
-          "Session terminals must be managed through the terminal endpoints",
-        );
-      }
-
-      const updated: SessionConfig = {
-        ...parsed,
-        terminals: syncDefaultTerminalCommand(
-          current.terminals,
-          current.command,
-          parsed.command,
-        ),
-      };
-      this.config.sessions[index] = updated;
-      return cloneSession(updated);
+      this.config.sessions[index] = parsed;
+      return cloneSession(parsed);
     });
   }
 
@@ -235,10 +219,7 @@ export class ConfigStore {
         );
       }
 
-      const terminal = terminalFromInput(input, {
-        defaultCommand: session.command,
-        generateId: true,
-      });
+      const terminal = terminalFromInput(input, { generateId: true });
       if (session.terminals.some((item) => item.id === terminal.id)) {
         throw new HttpError(
           409,
@@ -248,6 +229,60 @@ export class ConfigStore {
       }
 
       session.terminals.push(terminal);
+      return { ...terminal };
+    });
+  }
+
+  async updateTerminal(
+    sessionId: string,
+    terminalId: string,
+    input: unknown,
+  ): Promise<TerminalConfig> {
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new HttpError(
+        400,
+        "INVALID_TERMINAL",
+        "Terminal update must be a JSON object",
+      );
+    }
+
+    const patch = input as Record<string, unknown>;
+    if (typeof patch.id === "string" && patch.id.trim() !== terminalId) {
+      throw new HttpError(
+        400,
+        "INVALID_TERMINAL",
+        "Terminal id cannot be changed",
+      );
+    }
+
+    return await this.updateConfig(() => {
+      const session = this.config.sessions.find(
+        (item) => item.id === sessionId,
+      );
+      if (!session) {
+        throw new HttpError(
+          404,
+          "SESSION_NOT_FOUND",
+          `Session "${sessionId}" was not found`,
+        );
+      }
+
+      const index = session.terminals.findIndex(
+        (terminal) => terminal.id === terminalId,
+      );
+      if (index === -1) {
+        throw new HttpError(
+          404,
+          "TERMINAL_NOT_FOUND",
+          `Terminal "${terminalId}" was not found`,
+        );
+      }
+
+      const terminal = terminalFromInput(
+        { ...session.terminals[index], ...patch },
+        { id: terminalId },
+      );
+      session.terminals[index] = terminal;
       return { ...terminal };
     });
   }

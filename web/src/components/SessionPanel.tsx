@@ -21,11 +21,14 @@ import {
 import { SessionForm } from "./SessionForm";
 
 type SessionPanelProps = {
-  actionSessionId: string | null;
+  actionTerminalKey: string | null;
+  activeTerminalIds: Record<string, string | null>;
   collapsed: boolean;
   error: string | null;
   loading: boolean;
-  onCreateSession: (session: SessionConfig) => Promise<SessionConfig>;
+  onCreateSession: (
+    session: Omit<SessionConfig, "terminals">,
+  ) => Promise<SessionConfig>;
   onDeleteSession: (sessionId: string) => Promise<void>;
   onEditSession: (
     sessionId: string,
@@ -33,17 +36,23 @@ type SessionPanelProps = {
   ) => Promise<SessionConfig>;
   onRefresh: () => void;
   onSelect: (sessionId: string) => void;
-  onStart: (sessionId: string) => void;
-  onStop: (sessionId: string) => void;
+  onStart: (sessionId: string, terminalId: string) => void;
+  onStop: (sessionId: string, terminalId: string) => void;
   onToggleCollapsed: () => void;
   outputActivities: OutputActivities;
   selectedSessionId: string | null;
   sessions: SessionConfig[];
   statuses: Record<string, RuntimeStatus>;
+  terminalStatuses: Record<string, Record<string, RuntimeStatus>>;
 };
 
+function terminalActionKey(sessionId: string, terminalId: string): string {
+  return `${sessionId}\u0000${terminalId}`;
+}
+
 export function SessionPanel({
-  actionSessionId,
+  actionTerminalKey,
+  activeTerminalIds,
   collapsed,
   error,
   loading,
@@ -59,6 +68,7 @@ export function SessionPanel({
   selectedSessionId,
   sessions,
   statuses,
+  terminalStatuses,
 }: SessionPanelProps) {
   const [editor, setEditor] = useState<SessionEditorState | null>(null);
   const { draft, loadDraft, resetDraft, updateDraft } = useSessionDraft();
@@ -155,7 +165,6 @@ export function SessionPanel({
           id: nextSession.id,
           name: nextSession.name,
           cwd: nextSession.cwd,
-          command: nextSession.command,
           prompts: nextSession.prompts,
         });
       }
@@ -296,10 +305,16 @@ export function SessionPanel({
           <p className="empty-state">No configured sessions.</p>
         ) : null}
         {sessions.map((session) => {
-          const status = statuses[session.id];
+          const terminalId =
+            activeTerminalIds[session.id] ?? session.terminals[0]?.id ?? null;
+          const terminalStatus = terminalId
+            ? terminalStatuses[session.id]?.[terminalId]
+            : undefined;
           const isSelected = session.id === selectedSessionId;
-          const isRunning = status?.state === "running";
-          const isBusy = actionSessionId === session.id;
+          const isRunning = terminalStatus?.state === "running";
+          const isBusy = terminalId
+            ? actionTerminalKey === terminalActionKey(session.id, terminalId)
+            : false;
           const isDeleting = deletingSessionId === session.id;
           const activity = outputActivities[session.id];
 
@@ -335,27 +350,28 @@ export function SessionPanel({
                     </span>
                   </span>
                   <span className={`status-pill ${isRunning ? "run" : "stop"}`}>
-                    {statusLabel(status)}
+                    {terminalId ? statusLabel(terminalStatus) : "No terminal"}
                   </span>
                 </span>
                 <span className="session-meta" title={session.cwd}>
                   {session.cwd}
                 </span>
-                <span className="session-command" title={session.command}>
-                  {session.command}
-                </span>
               </button>
               <div className="session-actions">
                 <button
-                  disabled={isRunning || isBusy || isDeleting}
-                  onClick={() => onStart(session.id)}
+                  disabled={!terminalId || isRunning || isBusy || isDeleting}
+                  onClick={() =>
+                    terminalId ? onStart(session.id, terminalId) : undefined
+                  }
                   type="button"
                 >
                   Start
                 </button>
                 <button
-                  disabled={!isRunning || isBusy || isDeleting}
-                  onClick={() => onStop(session.id)}
+                  disabled={!terminalId || !isRunning || isBusy || isDeleting}
+                  onClick={() =>
+                    terminalId ? onStop(session.id, terminalId) : undefined
+                  }
                   type="button"
                 >
                   Stop
