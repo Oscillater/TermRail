@@ -56,6 +56,9 @@ namespace TermRail
         private const uint FileShareWrite = 0x00000002;
         private const uint OpenExisting = 3;
         private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
+        private const string SelfTestEnv = "TERMRAIL_WINDOWS_INPUT_SELF_TEST";
+        private const string SelfTestSafeInput = "__termrail_test_err_safe__";
+        private const string SelfTestUnknownInput = "__termrail_test_err_unknown__";
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct KeyEventRecord
@@ -133,8 +136,16 @@ namespace TermRail
                     }
 
                     string data = Encoding.UTF8.GetString(Convert.FromBase64String(fields[2]));
-                    Inject(processId, data);
-                    response = "ACK\t" + requestId;
+                    string selfTestResponse = TryHandleSelfTest(requestId, processId, data);
+                    if (selfTestResponse != null)
+                    {
+                        response = selfTestResponse;
+                    }
+                    else
+                    {
+                        Inject(processId, data);
+                        response = "ACK\t" + requestId;
+                    }
                 }
                 catch (ConsoleInputInjectionException error)
                 {
@@ -150,6 +161,49 @@ namespace TermRail
                 protocolOutput.WriteLine(response);
                 protocolOutput.Flush();
             }
+        }
+
+        private static string TryHandleSelfTest(
+            string requestId,
+            uint processId,
+            string data
+        )
+        {
+            if (
+                Environment.GetEnvironmentVariable(SelfTestEnv) != "1" ||
+                processId != 0
+            )
+            {
+                return null;
+            }
+
+            if (data == SelfTestSafeInput)
+            {
+                return ErrorResponse(
+                    "ERR_SAFE",
+                    requestId,
+                    "self-test safe failure before WriteConsoleInputW"
+                );
+            }
+            if (data == SelfTestUnknownInput)
+            {
+                return ErrorResponse(
+                    "ERR_UNKNOWN",
+                    requestId,
+                    "self-test unknown failure after WriteConsoleInputW"
+                );
+            }
+            return null;
+        }
+
+        private static string ErrorResponse(
+            string kind,
+            string requestId,
+            string message
+        )
+        {
+            return kind + "\t" + requestId + "\t" +
+                Convert.ToBase64String(Encoding.UTF8.GetBytes(message));
         }
 
         private static void Inject(uint processId, string data)

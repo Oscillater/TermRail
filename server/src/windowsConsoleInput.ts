@@ -130,7 +130,8 @@ export class WindowsConsoleInput {
       this.child = child;
       this.stderr = "";
 
-      let ready = false;
+      let helperReady = false;
+      let startupSettled = false;
       const startupTimeoutMs =
         this.timeouts.startupTimeoutMs ?? defaultStartupTimeoutMs;
       const timeout = setTimeout(() => {
@@ -140,23 +141,24 @@ export class WindowsConsoleInput {
           "not-delivered",
         );
         failStart(error);
-        this.disable(error);
+        this.disable(error, { keepUnavailable: true });
       }, startupTimeoutMs);
 
       const failStart = (error: Error) => {
-        if (ready) {
+        if (startupSettled) {
           return;
         }
-        ready = true;
+        startupSettled = true;
         clearTimeout(timeout);
         reject(error);
       };
 
       this.lines = createInterface({ input: child.stdout });
       this.lines.on("line", (line) => {
-        if (!ready) {
+        if (!startupSettled) {
           if (line === "READY") {
-            ready = true;
+            helperReady = true;
+            startupSettled = true;
             clearTimeout(timeout);
             resolve();
           }
@@ -170,23 +172,25 @@ export class WindowsConsoleInput {
         this.stderr = `${this.stderr}${chunk}`.slice(-8_000);
       });
       child.once("error", (error) => {
+        const wasReady = helperReady;
         const helperError = new WindowsConsoleInputError(
           error.message,
           "helper",
           "not-delivered",
         );
         failStart(helperError);
-        this.handleExit(child, helperError);
+        this.handleExit(child, helperError, { keepUnavailable: !wasReady });
       });
       child.once("exit", (code, signal) => {
+        const wasReady = helperReady;
         const details = this.stderr.trim();
         const error = new WindowsConsoleInputError(
           `Windows console input helper exited (${signal ?? code ?? "unknown"})${details ? `: ${details}` : ""}`,
           "helper",
-          ready ? "unknown" : "not-delivered",
+          wasReady ? "unknown" : "not-delivered",
         );
         failStart(error);
-        this.handleExit(child, error);
+        this.handleExit(child, error, { keepUnavailable: !wasReady });
       });
     });
 
@@ -308,11 +312,14 @@ export class WindowsConsoleInput {
   private handleExit(
     child: ChildProcessWithoutNullStreams,
     error: Error,
+    options: { keepUnavailable: boolean },
   ): void {
     if (this.child !== child) {
       return;
     }
-    this.unavailableError = error;
+    if (options.keepUnavailable) {
+      this.unavailableError = error;
+    }
     this.rejectPending(
       new WindowsConsoleInputError(error.message, "helper", "unknown"),
     );
@@ -322,11 +329,16 @@ export class WindowsConsoleInput {
     this.startPromise = null;
   }
 
-  private disable(error: Error): void {
-    if (this.disposed || this.unavailableError) {
+  private disable(
+    error: Error,
+    options: { keepUnavailable?: boolean } = {},
+  ): void {
+    if (this.disposed || (options.keepUnavailable && this.unavailableError)) {
       return;
     }
-    this.unavailableError = error;
+    if (options.keepUnavailable) {
+      this.unavailableError = error;
+    }
     this.rejectPending(
       new WindowsConsoleInputError(error.message, "helper", "unknown"),
     );

@@ -1,4 +1,5 @@
 const { spawn } = require("node:child_process");
+const { createHash } = require("node:crypto");
 const { copyFile, mkdtemp, rm } = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
@@ -13,6 +14,10 @@ const exampleConfigPath = path.join(projectRoot, "data", "config.example.json");
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 async function waitForOutput(readOutput, expected, timeoutMs = 2000) {
@@ -575,6 +580,103 @@ function runMissingTerminalIdCheck() {
   });
 }
 
+async function expectHttpError(response, expectedStatus, expectedCode, label) {
+  const text = await response.text();
+  if (response.status !== expectedStatus) {
+    throw new Error(
+      `${label} returned ${response.status}, expected ${expectedStatus}: ${text}`,
+    );
+  }
+
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new Error(`${label} returned non-JSON error body: ${text}`);
+  }
+
+  if (body.error?.code !== expectedCode) {
+    throw new Error(
+      `${label} returned ${JSON.stringify(body)}, expected ${expectedCode}`,
+    );
+  }
+}
+
+function expectWebSocketError(payload, expectedCode, label) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error(`timeout waiting for ${label} WebSocket error`));
+    }, 3000);
+
+    ws.on("open", () => {
+      ws.send(JSON.stringify(payload));
+    });
+    ws.on("message", (data) => {
+      const message = JSON.parse(data.toString());
+      clearTimeout(timeout);
+      ws.close();
+      if (message.type !== "error" || message.error?.code !== expectedCode) {
+        reject(
+          new Error(
+            `${label} WebSocket returned ${JSON.stringify(message)}, expected ${expectedCode}`,
+          ),
+        );
+        return;
+      }
+      resolve();
+    });
+    ws.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+}
+
+async function assertTerminalActionsRejected(terminalId, label) {
+  for (const action of ["start", "stop"]) {
+    const response = await fetch(
+      `http://127.0.0.1:${port}/api/sessions/${sessionId}/terminals/${terminalId}/${action}`,
+      { method: "POST" },
+    );
+    await expectHttpError(
+      response,
+      404,
+      "TERMINAL_NOT_FOUND",
+      `${label} HTTP ${action}`,
+    );
+  }
+
+  await expectWebSocketError(
+    { type: "input", sessionId, terminalId, data: "ignored" },
+    "TERMINAL_NOT_FOUND",
+    `${label} input`,
+  );
+  await expectWebSocketError(
+    { type: "resize", sessionId, terminalId, cols: 80, rows: 24 },
+    "TERMINAL_NOT_FOUND",
+    `${label} resize`,
+  );
+}
+
+async function runTerminalActionGuardCheck() {
+  await assertTerminalActionsRejected(
+    "missing-terminal-smoke",
+    "missing terminal",
+  );
+
+  const terminalId = "deleted-terminal-smoke";
+  await deleteTerminalIfExists(terminalId);
+  await createSmokeTerminal(
+    sessionId,
+    "node -e \"console.log('delete-guard')\"",
+    { id: terminalId, name: "Deleted Terminal Guard" },
+  );
+  await deleteTerminal(terminalId);
+  await assertTerminalActionsRejected(terminalId, "deleted terminal");
+}
+
 async function runRemovedSessionActionsCheck() {
   for (const action of ["start", "stop"]) {
     const response = await fetch(
@@ -627,13 +729,17 @@ async function createSmokeSession(targetSessionId) {
   return created.session;
 }
 
-async function createSmokeTerminal(targetSessionId, command) {
+async function createSmokeTerminal(targetSessionId, command, options = {}) {
   const response = await fetch(
     `http://127.0.0.1:${port}/api/sessions/${targetSessionId}/terminals`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "Smoke Terminal", command }),
+      body: JSON.stringify({
+        id: options.id,
+        name: options.name ?? "Smoke Terminal",
+        command,
+      }),
     },
   );
   if (!response.ok) {
@@ -757,6 +863,52 @@ async function deleteTerminal(terminalId) {
     throw new Error(
       `delete terminal failed: ${response.status} ${await response.text()}`,
     );
+  }
+}
+
+async function deleteTerminalIfExists(terminalId) {
+  const response = await fetch(
+    `http://127.0.0.1:${port}/api/sessions/${sessionId}/terminals/${terminalId}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok && response.status !== 404) {
+    throw new Error(
+      `delete terminal ${terminalId} failed: ${response.status} ${await response.text()}`,
+    );
+  }
+}
+
+async function runDeleteRecreateTerminalCleanupCheck() {
+  const terminalId = "smoke-recreated-terminal";
+  const oldMarker = "recreated-terminal-old";
+  const newMarker = "recreated-terminal-new";
+
+  await deleteTerminalIfExists(terminalId);
+  try {
+    await createSmokeTerminal(
+      sessionId,
+      `node -e "console.log('${oldMarker}')"`,
+      { id: terminalId, name: "Recreated Terminal" },
+    );
+    const oldBuffer = await waitForTerminalText(terminalId, oldMarker);
+    if (!oldBuffer.includes(oldMarker)) {
+      throw new Error(`old terminal buffer was ${JSON.stringify(oldBuffer)}`);
+    }
+
+    await deleteTerminal(terminalId);
+    await createSmokeTerminal(
+      sessionId,
+      `node -e "console.log('${newMarker}')"`,
+      { id: terminalId, name: "Recreated Terminal" },
+    );
+    const newBuffer = await waitForTerminalText(terminalId, newMarker);
+    if (newBuffer.includes(oldMarker)) {
+      throw new Error(
+        `recreated terminal inherited old output: ${JSON.stringify(newBuffer)}`,
+      );
+    }
+  } finally {
+    await deleteTerminalIfExists(terminalId).catch(() => undefined);
   }
 }
 
@@ -944,6 +1096,7 @@ async function runUnicodeInputCheck() {
   const repeatedPunctuation = "\u201d\u201d";
   const input = '中文输入、……——“”‘’/^ - "';
   const expectedMarker = `UNICODE_HEX:${Buffer.from(input, "utf8").toString("hex")}`;
+  const submittedInput = `\x7f\x7f${input}\r`;
   const command =
     "node -e \"process.stdin.setEncoding('utf8');process.stdin.once('data',data=>{console.log('UNICODE_HEX:'+Buffer.from(data.trim(),'utf8').toString('hex'));process.exit(0)});console.log('unicode-ready')\"";
 
@@ -963,6 +1116,7 @@ async function runUnicodeInputCheck() {
 
   const created = await createResponse.json();
   const terminalId = created.terminal.id;
+  const expectedHelperTrace = `sha256=${sha256(submittedInput)}`;
 
   try {
     await new Promise((resolve, reject) => {
@@ -1002,7 +1156,7 @@ async function runUnicodeInputCheck() {
               type: "input",
               sessionId,
               terminalId,
-              data: `\x7f\x7f${input}\r`,
+              data: submittedInput,
             }),
           );
         }
@@ -1068,6 +1222,8 @@ async function runUnicodeInputCheck() {
       );
     }
   }
+
+  return expectedHelperTrace;
 }
 
 async function main() {
@@ -1082,6 +1238,7 @@ async function main() {
       PORT: String(port),
       CONFIG_PATH: configPath,
       TERMRAIL_WINDOWS_PTY: "",
+      TERMRAIL_TRACE_WINDOWS_INPUT: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -1120,21 +1277,20 @@ async function main() {
     const output = await runWebSocketCheck();
     await runNoBufferSubscriptionCheck();
     await runMissingTerminalIdCheck();
+    await runTerminalActionGuardCheck();
     await runRemovedSessionActionsCheck();
     await runSecondTerminalCheck();
+    await runDeleteRecreateTerminalCleanupCheck();
     await runConcurrentStartCheck();
     await runConcurrentUpdateStartCheck();
     await runBracketedPasteCheck();
-    await runUnicodeInputCheck();
+    const unicodeInputHelperTrace = await runUnicodeInputCheck();
     if (
       process.platform === "win32" &&
-      !(await waitForOutput(
-        () => serverStdout,
-        "[server] Windows console input helper acknowledged input",
-      ))
+      !(await waitForOutput(() => serverStdout, unicodeInputHelperTrace))
     ) {
       throw new Error(
-        `Windows console input helper did not acknowledge smoke input; stdout=${JSON.stringify(serverStdout)} stderr=${JSON.stringify(serverStderr)}`,
+        `Windows console input helper did not acknowledge the Unicode smoke request (${unicodeInputHelperTrace}); stdout=${JSON.stringify(serverStdout)} stderr=${JSON.stringify(serverStderr)}`,
       );
     }
     await runReadonlyTerminalsUpdateCheck();

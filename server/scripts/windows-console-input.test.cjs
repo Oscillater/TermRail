@@ -1,5 +1,7 @@
 const assert = require("node:assert/strict");
+const { spawn } = require("node:child_process");
 const { EventEmitter } = require("node:events");
+const path = require("node:path");
 const { PassThrough } = require("node:stream");
 
 class FakeHelperProcess extends EventEmitter {
@@ -74,14 +76,70 @@ async function rejectionOf(promise) {
 
 async function startInput(WindowsConsoleInput, timeouts = {}) {
   let child;
+  const children = [];
   const input = new WindowsConsoleInput(() => {
     child = new FakeHelperProcess();
+    children.push(child);
     return child;
   }, timeouts);
   const start = input.start();
   child.stdout.write("READY\n");
   await start;
-  return { child, input };
+  return { child, children, input };
+}
+
+function createRealSelfTestHelper() {
+  return spawn(
+    "powershell.exe",
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      path.join(__dirname, "windows-console-input.ps1"),
+    ],
+    {
+      env: {
+        ...process.env,
+        TERMRAIL_WINDOWS_INPUT_SELF_TEST: "1",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+}
+
+async function testRealPowerShellHelperClassifiesErrors({
+  isWindowsConsoleInputRetrySafe,
+  WindowsConsoleInput,
+  WindowsConsoleInputError,
+}) {
+  if (process.platform !== "win32") {
+    return;
+  }
+
+  const input = new WindowsConsoleInput(createRealSelfTestHelper);
+  try {
+    const safeError = await rejectionOf(
+      input.write(0, "__termrail_test_err_safe__"),
+    );
+    assert.ok(safeError instanceof WindowsConsoleInputError);
+    assert.equal(safeError.scope, "target");
+    assert.equal(safeError.delivery, "not-delivered");
+    assert.equal(isWindowsConsoleInputRetrySafe(safeError), true);
+
+    const unknownError = await rejectionOf(
+      input.write(0, "__termrail_test_err_unknown__"),
+    );
+    assert.ok(unknownError instanceof WindowsConsoleInputError);
+    assert.equal(unknownError.scope, "target");
+    assert.equal(unknownError.delivery, "unknown");
+    assert.equal(isWindowsConsoleInputRetrySafe(unknownError), false);
+  } finally {
+    input.dispose();
+  }
 }
 
 async function main() {
@@ -177,11 +235,17 @@ async function main() {
   const timeoutError = await rejectionOf(timedOutWrite);
   assert.equal(timeoutError.delivery, "unknown");
   assert.equal(isWindowsConsoleInputRetrySafe(timeoutError), false);
-  const afterTimeoutError = await rejectionOf(
-    timedOut.input.write(45, "not dispatched"),
-  );
-  assert.equal(afterTimeoutError.delivery, "not-delivered");
-  assert.equal(isWindowsConsoleInputRetrySafe(afterTimeoutError), true);
+  const afterTimeoutWrite = timedOut.input.write(45, "recovered");
+  const afterTimeoutChild = timedOut.children[1];
+  afterTimeoutChild.stdout.write("READY\n");
+  const afterTimeoutRequest = await afterTimeoutChild.nextRequest();
+  assert.deepEqual(afterTimeoutRequest, {
+    id: 2,
+    processId: 45,
+    data: "recovered",
+  });
+  afterTimeoutChild.respond("ACK", afterTimeoutRequest.id);
+  await afterTimeoutWrite;
   timedOut.input.dispose();
 
   const exited = await startInput(WindowsConsoleInput);
@@ -191,11 +255,17 @@ async function main() {
   const exitError = await rejectionOf(exitedWrite);
   assert.equal(exitError.delivery, "unknown");
   assert.equal(isWindowsConsoleInputRetrySafe(exitError), false);
-  const afterExitError = await rejectionOf(
-    exited.input.write(46, "not dispatched either"),
-  );
-  assert.equal(afterExitError.delivery, "not-delivered");
-  assert.equal(isWindowsConsoleInputRetrySafe(afterExitError), true);
+  const afterExitWrite = exited.input.write(46, "recovered after exit");
+  const afterExitChild = exited.children[1];
+  afterExitChild.stdout.write("READY\n");
+  const afterExitRequest = await afterExitChild.nextRequest();
+  assert.deepEqual(afterExitRequest, {
+    id: 2,
+    processId: 46,
+    data: "recovered after exit",
+  });
+  afterExitChild.respond("ACK", afterExitRequest.id);
+  await afterExitWrite;
   exited.input.dispose();
 
   const invalidResponse = await startInput(WindowsConsoleInput);
@@ -205,7 +275,28 @@ async function main() {
   const invalidError = await rejectionOf(invalidWrite);
   assert.equal(invalidError.delivery, "unknown");
   assert.equal(isWindowsConsoleInputRetrySafe(invalidError), false);
+  const afterInvalidResponseWrite = invalidResponse.input.write(
+    47,
+    "recovered after invalid response",
+  );
+  const afterInvalidResponseChild = invalidResponse.children[1];
+  afterInvalidResponseChild.stdout.write("READY\n");
+  const afterInvalidResponseRequest =
+    await afterInvalidResponseChild.nextRequest();
+  assert.deepEqual(afterInvalidResponseRequest, {
+    id: 2,
+    processId: 47,
+    data: "recovered after invalid response",
+  });
+  afterInvalidResponseChild.respond("ACK", afterInvalidResponseRequest.id);
+  await afterInvalidResponseWrite;
   invalidResponse.input.dispose();
+
+  await testRealPowerShellHelperClassifiesErrors({
+    isWindowsConsoleInputRetrySafe,
+    WindowsConsoleInput,
+    WindowsConsoleInputError,
+  });
 
   console.log("Windows console input routing tests passed");
 }
