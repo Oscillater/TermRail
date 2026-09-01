@@ -11,7 +11,7 @@ export type {
   WsServerMessage,
 } from "@termrail/shared";
 
-import type { RuntimeStatus, TerminalOutputEvent } from "@termrail/shared";
+import type { RuntimeStatus } from "@termrail/shared";
 
 export type SessionsResponse = {
   prompts?: import("@termrail/shared").PromptExample[];
@@ -60,18 +60,6 @@ export type TerminalInputRequest = {
 export type TerminalScrollState = {
   viewportY: number;
   baseY: number;
-};
-
-export type TerminalOutputDelivery = TerminalOutputEvent & {
-  deliveryId: number;
-};
-
-export type TerminalSessionSnapshot = {
-  id: number;
-  sessionId: string;
-  terminalId: string;
-  status: RuntimeStatus;
-  buffer: string;
 };
 
 export type TerminalTarget = {

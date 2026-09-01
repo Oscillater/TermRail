@@ -113,12 +113,11 @@ export function App() {
           void app.runTerminalAction(sessionId, terminalId, "stop")
         }
         onUpdateTerminal={app.updateTerminal}
-        output={app.terminalOutput}
         session={app.selectedSession}
-        snapshot={app.terminalSnapshot}
         status={app.selectedTerminalStatus}
         terminal={app.selectedTerminal}
         terminalStatuses={app.selectedTerminalStatuses}
+        terminalStream={app.terminalStream}
       />
       <PromptPanel
         collapsed={collapsedPanels.prompts}

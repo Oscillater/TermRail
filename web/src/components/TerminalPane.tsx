@@ -11,10 +11,9 @@ import type {
   StreamConnectionState,
   TerminalConfig,
   TerminalInputRequest,
-  TerminalOutputDelivery,
-  TerminalSessionSnapshot,
   TerminalSize,
 } from "../types";
+import type { TerminalStream } from "../terminalStream";
 import { formatDate, statusLabel } from "../utils/activity";
 import { messageFromError } from "../utils/errors";
 import {
@@ -102,12 +101,11 @@ type TerminalPaneProps = {
     terminalId: string,
     terminal: Pick<TerminalConfig, "name" | "command">,
   ) => Promise<TerminalConfig>;
-  output: TerminalOutputDelivery | null;
   session: SessionConfig | null;
-  snapshot: TerminalSessionSnapshot | null;
   status: RuntimeStatus | undefined;
   terminal: TerminalConfig | null;
   terminalStatuses: Record<string, RuntimeStatus>;
+  terminalStream: TerminalStream;
 };
 
 function terminalActionKey(sessionId: string, terminalId: string): string {
@@ -242,12 +240,11 @@ export function TerminalPane({
   onStartTerminal,
   onStopTerminal,
   onUpdateTerminal,
-  output,
   session,
-  snapshot,
   status,
   terminal,
   terminalStatuses,
+  terminalStream,
 }: TerminalPaneProps) {
   const viewportRef = useRef<TerminalViewportHandle | null>(null);
   const terminalCommandInputRef = useRef<HTMLInputElement | null>(null);
@@ -607,14 +604,13 @@ export function TerminalPane({
         onInput={onInput}
         onResize={onResize}
         onSize={onSize}
-        output={output}
         ref={viewportRef}
         savingTerminal={isSaving}
         sessionId={session?.id ?? null}
-        snapshot={snapshot}
         status={status}
         terminalExists={Boolean(terminal)}
         terminalId={terminal?.id ?? null}
+        terminalStream={terminalStream}
       />
 
       <footer className="terminal-footer">

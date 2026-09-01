@@ -38,3 +38,13 @@ export function readTerminalScrollState(
     viewportY: clampValue(buffer.viewportY, 0, baseY),
   };
 }
+
+export function focusTerminalPreventScroll(terminal: Terminal): void {
+  const textarea = terminal.textarea;
+  if (textarea) {
+    textarea.focus({ preventScroll: true });
+    return;
+  }
+
+  terminal.focus();
+}

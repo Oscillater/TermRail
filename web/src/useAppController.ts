@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { jsonHeaders, jsonRequest } from "./api";
 import { useSessionStream } from "./hooks/useSessionStream";
+import { createTerminalStream } from "./terminalStream";
 import type {
   PromptsResponse,
   RuntimeStatus,
@@ -27,6 +28,14 @@ import {
 
 type TerminalStatusesBySession = Record<string, Record<string, RuntimeStatus>>;
 type ActiveTerminalIds = Record<string, string | null>;
+type PendingActivityOutput = {
+  sessionId: string;
+  terminalId: string;
+  outputAtIso?: string;
+  receivedAt: number;
+};
+
+const activityOutputFlushMs = 100;
 
 function actionKey(sessionId: string, terminalId: string): string {
   return `${sessionId}\u0000${terminalId}`;
@@ -145,7 +154,12 @@ export function useAppController() {
   const statusesRef = useRef<Record<string, RuntimeStatus>>({});
   const terminalStatusesRef = useRef<TerminalStatusesBySession>({});
   const statusRefreshInFlightRef = useRef(false);
+  const activityOutputFlushTimerRef = useRef<number | null>(null);
+  const pendingActivityOutputsRef = useRef<
+    Record<string, PendingActivityOutput>
+  >({});
   const terminalInputRequestIdRef = useRef(0);
+  const terminalStream = useMemo(() => createTerminalStream(), []);
 
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedSessionId) ?? null,
@@ -412,13 +426,20 @@ export function useAppController() {
     };
   }, []);
 
-  const handleActivityOutput = useCallback(
-    (sessionId: string, terminalId: string, outputAtIso?: string) => {
+  const flushActivityOutputs = useCallback(() => {
+    const pending = Object.values(pendingActivityOutputsRef.current);
+    pendingActivityOutputsRef.current = {};
+    activityOutputFlushTimerRef.current = null;
+    if (pending.length === 0) {
+      return;
+    }
+
+    let latestReceivedAt = 0;
+    pending.forEach(({ sessionId, terminalId, outputAtIso, receivedAt }) => {
       if (!sessionsRef.current.some((session) => session.id === sessionId)) {
         return;
       }
 
-      const receivedAt = Date.now();
       const outputAt = timestampFromIso(outputAtIso ?? null) ?? receivedAt;
       const previousStatus =
         terminalStatusesRef.current[sessionId]?.[terminalId] ??
@@ -433,10 +454,46 @@ export function useAppController() {
         exitCode: null,
         lastOutputAt: new Date(outputAt).toISOString(),
       });
-      setActivityNow(receivedAt);
+      latestReceivedAt = Math.max(latestReceivedAt, receivedAt);
+    });
+
+    if (latestReceivedAt > 0) {
+      setActivityNow(latestReceivedAt);
+    }
+  }, [updateTerminalStatus]);
+
+  const handleActivityOutput = useCallback(
+    (sessionId: string, terminalId: string, outputAtIso?: string) => {
+      if (!sessionsRef.current.some((session) => session.id === sessionId)) {
+        return;
+      }
+
+      pendingActivityOutputsRef.current[actionKey(sessionId, terminalId)] = {
+        sessionId,
+        terminalId,
+        outputAtIso,
+        receivedAt: Date.now(),
+      };
+      if (activityOutputFlushTimerRef.current !== null) {
+        return;
+      }
+
+      activityOutputFlushTimerRef.current = window.setTimeout(
+        flushActivityOutputs,
+        activityOutputFlushMs,
+      );
     },
-    [updateTerminalStatus],
+    [flushActivityOutputs],
   );
+
+  useEffect(() => {
+    return () => {
+      if (activityOutputFlushTimerRef.current !== null) {
+        window.clearTimeout(activityOutputFlushTimerRef.current);
+      }
+      pendingActivityOutputsRef.current = {};
+    };
+  }, []);
 
   const refreshStatuses = useCallback(async () => {
     if (statusRefreshInFlightRef.current || sessionsRef.current.length === 0) {
@@ -471,6 +528,7 @@ export function useAppController() {
     onOutput: handleActivityOutput,
     onSessionStatus: updateSessionStatus,
     onTerminalStatus: updateTerminalStatus,
+    terminalStream,
     terminalTargets,
   });
 
@@ -737,7 +795,6 @@ export function useAppController() {
     createTerminal,
     deleteSession,
     deleteTerminal,
-    handleActivityOutput,
     loadSessions,
     loading,
     outputActivities,
@@ -760,14 +817,13 @@ export function useAppController() {
     streamConnectionState: sessionStream.connectionState,
     sessions,
     statuses,
-    terminalOutput: sessionStream.terminalOutput,
     terminalInputRequest,
     terminalError,
-    terminalSnapshot: sessionStream.terminalSnapshot,
     promptError,
     sendTerminalInput: sessionStream.sendInput,
     sendTerminalResize: sessionStream.sendResize,
     terminalStatuses,
+    terminalStream,
     updatePrompts,
     updateSession,
     updateTerminal,

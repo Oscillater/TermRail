@@ -2,6 +2,7 @@ import { type RefObject, useCallback, useEffect, useRef } from "react";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
+import { focusTerminalPreventScroll } from "../utils/terminal";
 
 type UseXtermInstanceOptions = {
   onCopyShortcut: (terminal: Terminal) => void;
@@ -12,6 +13,15 @@ type UseXtermInstanceOptions = {
   onResize: (terminal: Terminal, cols: number, rows: number) => void;
   onScroll: (terminal: Terminal) => void;
 };
+
+function canFitTerminal(container: HTMLElement | null): boolean {
+  if (!container) {
+    return false;
+  }
+
+  const rect = container.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
 
 export function useXtermInstance(
   terminalRef: RefObject<Terminal | null>,
@@ -31,10 +41,12 @@ export function useXtermInstance(
   const fitTerminal = useCallback(() => {
     const terminal = terminalRef.current;
     if (terminal) {
-      fitAddonRef.current?.fit();
+      if (canFitTerminal(containerRef.current)) {
+        fitAddonRef.current?.fit();
+      }
       onReady(terminal);
       terminal.refresh(0, Math.max(0, terminal.rows - 1));
-      terminal.focus();
+      focusTerminalPreventScroll(terminal);
     }
   }, [onReady, terminalRef]);
 
@@ -82,7 +94,9 @@ export function useXtermInstance(
     } catch {
       // Fall back to the default DOM renderer if canvas is unavailable.
     }
-    fitAddon.fit();
+    if (canFitTerminal(container)) {
+      fitAddon.fit();
+    }
     onReady(terminal);
 
     terminalRef.current = terminal;
@@ -164,6 +178,9 @@ export function useXtermInstance(
       resizeFrame = window.requestAnimationFrame(() => {
         resizeFrame = null;
         const terminal = terminalRef.current;
+        if (!canFitTerminal(target)) {
+          return;
+        }
         fitAddon.fit();
         if (terminal) {
           onReady(terminal);

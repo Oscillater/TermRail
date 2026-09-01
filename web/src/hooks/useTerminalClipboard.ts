@@ -2,6 +2,7 @@ import { useCallback } from "react";
 import { Terminal } from "@xterm/xterm";
 import { readClipboardText, writeClipboardText } from "../utils/clipboard";
 import { messageFromError } from "../utils/errors";
+import { focusTerminalPreventScroll } from "../utils/terminal";
 
 export function useTerminalClipboard(
   onError: (message: string | null) => void,
@@ -44,7 +45,7 @@ export function useTerminalClipboard(
         }
 
         terminal.clearSelection();
-        terminal.focus();
+        focusTerminalPreventScroll(terminal);
         onError(null);
       } catch (error) {
         onError(messageFromError(error, "Failed to copy terminal selection"));
@@ -61,7 +62,7 @@ export function useTerminalClipboard(
           return;
         }
         terminal.paste(text);
-        terminal.focus();
+        focusTerminalPreventScroll(terminal);
         onError(null);
       } catch (error) {
         onError(messageFromError(error, "Failed to paste clipboard"));

@@ -11,15 +11,17 @@ import type {
   RuntimeStatus,
   StreamConnectionState,
   TerminalInputRequest,
-  TerminalOutputDelivery,
-  TerminalSessionSnapshot,
   TerminalSize,
 } from "../types";
+import type { TerminalStream } from "../terminalStream";
 import { useTerminalClipboard } from "../hooks/useTerminalClipboard";
 import { useTerminalScroll } from "../hooks/useTerminalScroll";
 import { useTerminalWriter } from "../hooks/useTerminalWriter";
 import { useXtermInstance } from "../hooks/useXtermInstance";
-import { clampTerminalSize } from "../utils/terminal";
+import {
+  clampTerminalSize,
+  focusTerminalPreventScroll,
+} from "../utils/terminal";
 
 export type TerminalViewportHandle = {
   focus: () => void;
@@ -41,13 +43,12 @@ type TerminalViewportProps = {
     rows: number,
   ) => boolean;
   onSize: (size: TerminalSize) => void;
-  output: TerminalOutputDelivery | null;
   savingTerminal: boolean;
   sessionId: string | null;
-  snapshot: TerminalSessionSnapshot | null;
   status: RuntimeStatus | undefined;
   terminalExists: boolean;
   terminalId: string | null;
+  terminalStream: TerminalStream;
 };
 
 export const TerminalViewport = forwardRef<
@@ -64,13 +65,12 @@ export const TerminalViewport = forwardRef<
     onInput,
     onResize,
     onSize,
-    output,
     savingTerminal,
     sessionId,
-    snapshot,
     status,
     terminalExists,
     terminalId,
+    terminalStream,
   },
   ref,
 ) {
@@ -93,8 +93,14 @@ export const TerminalViewport = forwardRef<
   } = useTerminalScroll(terminalRef);
   const { copyTerminalSelection, pasteTerminalClipboard } =
     useTerminalClipboard(onError);
-  const { cancelTerminalWrites, queueTerminalWrite, resetTerminalOutput } =
-    useTerminalWriter(terminalRef, updateTerminalScrollState);
+  const {
+    cancelTerminalWrites,
+    isRestoringOutput,
+    isRestoringOutputRef,
+    queueTerminalWrite,
+    resetTerminalOutput,
+    restoreTerminalSnapshot,
+  } = useTerminalWriter(terminalRef, updateTerminalScrollState);
 
   const sendTerminalInput = useCallback(
     (data: string, reportErrors: boolean) => {
@@ -133,7 +139,10 @@ export const TerminalViewport = forwardRef<
         return false;
       }
       if (keyboardOwnerRef.current === "terminal") {
-        terminalRef.current?.focus();
+        const terminal = terminalRef.current;
+        if (terminal) {
+          focusTerminalPreventScroll(terminal);
+        }
       }
       return true;
     },
@@ -219,6 +228,16 @@ export const TerminalViewport = forwardRef<
     [pasteTerminalClipboard],
   );
 
+  const handleTerminalScroll = useCallback(
+    (xterm: Terminal) => {
+      if (isRestoringOutputRef.current) {
+        return;
+      }
+      updateTerminalScrollState(xterm);
+    },
+    [isRestoringOutputRef, updateTerminalScrollState],
+  );
+
   const { containerRef, fitTerminal } = useXtermInstance(terminalRef, {
     onCopyShortcut: handleCopyShortcut,
     onData: handleTerminalData,
@@ -226,14 +245,17 @@ export const TerminalViewport = forwardRef<
     onPasteShortcut: handlePasteShortcut,
     onReady: handleTerminalReady,
     onResize: handleTerminalResize,
-    onScroll: updateTerminalScrollState,
+    onScroll: handleTerminalScroll,
   });
 
   useImperativeHandle(
     ref,
     () => ({
       focus: () => {
-        terminalRef.current?.focus();
+        const terminal = terminalRef.current;
+        if (terminal) {
+          focusTerminalPreventScroll(terminal);
+        }
       },
       fit: () => {
         fitTerminal();
@@ -283,43 +305,38 @@ export const TerminalViewport = forwardRef<
   ]);
 
   useEffect(() => {
-    const xterm = terminalRef.current;
-    if (!xterm || !snapshot) {
-      return;
+    if (!sessionId || !terminalId) {
+      return undefined;
     }
 
-    if (
-      snapshot.sessionId !== activeSessionIdRef.current ||
-      snapshot.terminalId !== activeTerminalIdRef.current
-    ) {
-      return;
-    }
+    return terminalStream.subscribe({ sessionId, terminalId }, (event) => {
+      const xterm = terminalRef.current;
+      if (
+        !xterm ||
+        event.sessionId !== activeSessionIdRef.current ||
+        event.terminalId !== activeTerminalIdRef.current
+      ) {
+        return;
+      }
 
-    resetTerminalOutput(xterm);
-    if (snapshot.buffer) {
-      queueTerminalWrite(snapshot.buffer);
-    }
-    publishTerminalSize(xterm.cols, xterm.rows);
-    sendResize(xterm.cols, xterm.rows);
+      if (event.type === "snapshot") {
+        restoreTerminalSnapshot(event.buffer);
+        publishTerminalSize(xterm.cols, xterm.rows);
+        sendResize(xterm.cols, xterm.rows);
+        return;
+      }
+
+      queueTerminalWrite(event.data);
+    });
   }, [
     publishTerminalSize,
     queueTerminalWrite,
-    resetTerminalOutput,
+    restoreTerminalSnapshot,
     sendResize,
-    snapshot,
+    sessionId,
+    terminalId,
+    terminalStream,
   ]);
-
-  useEffect(() => {
-    if (
-      !output ||
-      output.sessionId !== activeSessionIdRef.current ||
-      output.terminalId !== activeTerminalIdRef.current
-    ) {
-      return;
-    }
-
-    queueTerminalWrite(output.data);
-  }, [output, queueTerminalWrite]);
 
   useEffect(() => {
     if (!inputRequest) {
@@ -357,7 +374,10 @@ export const TerminalViewport = forwardRef<
       onFocusFormRequest();
       return;
     }
-    terminalRef.current?.focus();
+    const terminal = terminalRef.current;
+    if (terminal) {
+      focusTerminalPreventScroll(terminal);
+    }
   };
 
   const hasScrollback = scrollState.baseY > 0;
@@ -367,10 +387,16 @@ export const TerminalViewport = forwardRef<
   const scrollThumbTop = `calc(${(scrollProgress * 100).toFixed(3)}% - ${(
     scrollProgress * 34
   ).toFixed(1)}px)`;
+  const frameClassName = `terminal-frame${isRestoringOutput ? " restoring" : ""}`;
 
   return (
-    <div className="terminal-frame" onClick={focusTerminalOrForm}>
+    <div className={frameClassName} onClick={focusTerminalOrForm}>
       <div className="terminal-host" ref={containerRef} />
+      {terminalExists && isRestoringOutput ? (
+        <div className="terminal-restore-overlay" aria-live="polite">
+          Restoring terminal...
+        </div>
+      ) : null}
       {!terminalExists ? (
         <div className="terminal-empty-overlay">
           <h3>No terminal tabs</h3>
