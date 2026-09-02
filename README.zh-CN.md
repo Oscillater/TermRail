@@ -181,8 +181,18 @@ WebSocket 连接地址是 `/ws`。
 {
   "type": "subscribe",
   "sessionId": "my-project-codex",
+  "terminalId": "codex"
+}
+```
+
+```json
+{
+  "type": "snapshot",
+  "sessionId": "my-project-codex",
   "terminalId": "codex",
-  "includeBuffer": true
+  "requestId": "snapshot-1",
+  "cols": 120,
+  "rows": 32
 }
 ```
 
@@ -205,7 +215,7 @@ WebSocket 连接地址是 `/ws`。
 }
 ```
 
-服务端消息包括 `subscribed`、`unsubscribed`、`terminal.output`、`terminal.status`、`session.status` 和 `error`。
+服务端消息包括 `subscribed`、`terminal.snapshot`、`unsubscribed`、`terminal.output`、`terminal.status`、`session.status` 和 `error`。终端 snapshot 会在 `data` 里返回序列化后的 xterm 状态，并携带 `runtimeId`、`seq`、`cols`、`rows` 和 `format`。
 
 ## 开发
 

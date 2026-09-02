@@ -39,12 +39,15 @@ export function readTerminalScrollState(
   };
 }
 
-export function focusTerminalPreventScroll(terminal: Terminal): void {
+export function focusTerminalPreventScroll(terminal: Terminal): boolean {
   const textarea = terminal.textarea;
   if (textarea) {
     textarea.focus({ preventScroll: true });
-    return;
+    return document.activeElement === textarea;
   }
 
   terminal.focus();
+  return Boolean(
+    terminal.textarea && document.activeElement === terminal.textarea,
+  );
 }

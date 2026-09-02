@@ -154,7 +154,7 @@ function runNoBufferSubscriptionCheck() {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
     const timeout = setTimeout(() => {
       ws.close();
-      reject(new Error("timeout waiting for no-buffer subscription"));
+      reject(new Error("timeout waiting for subscription"));
     }, 3000);
 
     ws.on("open", () => {
@@ -163,7 +163,6 @@ function runNoBufferSubscriptionCheck() {
           type: "subscribe",
           sessionId,
           terminalId: mainTerminalId,
-          includeBuffer: false,
         }),
       );
     });
@@ -180,10 +179,12 @@ function runNoBufferSubscriptionCheck() {
         reject(new Error(`subscribed returned terminal ${message.terminalId}`));
         return;
       }
-      if (message.buffer !== "") {
+      if ("buffer" in message) {
         reject(
           new Error(
-            `no-buffer subscription returned ${message.buffer.length} chars`,
+            `subscription unexpectedly returned ${
+              message.data?.length ?? 0
+            } chars`,
           ),
         );
         return;
@@ -318,6 +319,7 @@ function waitForTerminalText(
 ) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    const snapshotRequestId = `wait-text:${Date.now()}`;
     let buffer = "";
     const timeout = setTimeout(() => {
       ws.close();
@@ -344,7 +346,16 @@ function waitForTerminalText(
           type: "subscribe",
           sessionId: targetSessionId,
           terminalId,
-          includeBuffer: true,
+        }),
+      );
+      ws.send(
+        JSON.stringify({
+          type: "snapshot",
+          sessionId: targetSessionId,
+          terminalId,
+          requestId: snapshotRequestId,
+          cols: 80,
+          rows: 24,
         }),
       );
     });
@@ -352,7 +363,9 @@ function waitForTerminalText(
     ws.on("message", (data) => {
       const message = JSON.parse(data.toString());
       if (
-        (message.type === "subscribed" || message.type === "terminal.output") &&
+        (message.type === "subscribed" ||
+          message.type === "terminal.snapshot" ||
+          message.type === "terminal.output") &&
         message.terminalId !== terminalId
       ) {
         clearTimeout(timeout);
@@ -362,8 +375,11 @@ function waitForTerminalText(
         );
         return;
       }
-      if (message.type === "subscribed") {
-        buffer += message.buffer;
+      if (
+        message.type === "terminal.snapshot" &&
+        message.requestId === snapshotRequestId
+      ) {
+        buffer += message.data;
         maybeResolve();
       }
       if (message.type === "terminal.output") {
@@ -1015,6 +1031,7 @@ async function runBracketedPasteCheck() {
   try {
     await new Promise((resolve, reject) => {
       const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+      const snapshotRequestId = `paste:${Date.now()}`;
       let buffer = "";
       let sent = false;
       const timeout = setTimeout(() => {
@@ -1053,14 +1070,26 @@ async function runBracketedPasteCheck() {
             type: "subscribe",
             sessionId,
             terminalId,
-            includeBuffer: true,
+          }),
+        );
+        ws.send(
+          JSON.stringify({
+            type: "snapshot",
+            sessionId,
+            terminalId,
+            requestId: snapshotRequestId,
+            cols: 80,
+            rows: 24,
           }),
         );
       });
       ws.on("message", (data) => {
         const message = JSON.parse(data.toString());
-        if (message.type === "subscribed") {
-          buffer += message.buffer;
+        if (
+          message.type === "terminal.snapshot" &&
+          message.requestId === snapshotRequestId
+        ) {
+          buffer += message.data;
           inspectBuffer();
         }
         if (message.type === "terminal.output") {
@@ -1121,6 +1150,7 @@ async function runUnicodeInputCheck() {
   try {
     await new Promise((resolve, reject) => {
       const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+      const snapshotRequestId = `unicode:${Date.now()}`;
       let buffer = "";
       let inputSent = false;
       let inputSubmitted = false;
@@ -1175,15 +1205,27 @@ async function runUnicodeInputCheck() {
             type: "subscribe",
             sessionId,
             terminalId,
-            includeBuffer: true,
+          }),
+        );
+        ws.send(
+          JSON.stringify({
+            type: "snapshot",
+            sessionId,
+            terminalId,
+            requestId: snapshotRequestId,
+            cols: 80,
+            rows: 24,
           }),
         );
       });
 
       ws.on("message", (data) => {
         const message = JSON.parse(data.toString());
-        if (message.type === "subscribed") {
-          buffer += message.buffer;
+        if (
+          message.type === "terminal.snapshot" &&
+          message.requestId === snapshotRequestId
+        ) {
+          buffer += message.data;
           inspectBuffer();
         }
         if (message.type === "terminal.output") {

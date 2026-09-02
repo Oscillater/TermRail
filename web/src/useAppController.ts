@@ -5,29 +5,35 @@ import { createTerminalStream } from "./terminalStream";
 import type {
   PromptsResponse,
   RuntimeStatus,
+  SessionAttentionById,
   SessionConfig,
   SessionResponse,
   SessionsResponse,
   StatusesResponse,
   StatusResponse,
+  TerminalAttentionBySession,
   TerminalConfig,
   TerminalInputRequest,
+  TerminalSnapshotRequestOptions,
   TerminalResponse,
   TerminalSize,
   TerminalTarget,
 } from "./types";
 import {
   aggregateSessionStatus,
-  collectOutputActivities,
+  collectSessionAttention,
   collectSessionPrompts,
+  collectTerminalAttention,
   defaultRuntimeStatus,
   mergeRuntimeStatus,
   statusRefreshIntervalMs,
+  terminalAttentionKey,
   timestampFromIso,
 } from "./utils/activity";
 
 type TerminalStatusesBySession = Record<string, Record<string, RuntimeStatus>>;
 type ActiveTerminalIds = Record<string, string | null>;
+type TerminalReadAt = Record<string, number>;
 type PendingActivityOutput = {
   sessionId: string;
   terminalId: string;
@@ -36,9 +42,98 @@ type PendingActivityOutput = {
 };
 
 const activityOutputFlushMs = 100;
+const terminalReadAtStorageKey = "termrail:terminal-read-at:v1";
 
 function actionKey(sessionId: string, terminalId: string): string {
   return `${sessionId}\u0000${terminalId}`;
+}
+
+function readTerminalReadAt(): TerminalReadAt {
+  try {
+    const raw = window.localStorage.getItem(terminalReadAtStorageKey);
+    if (!raw) {
+      return {};
+    }
+
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, number] =>
+          typeof entry[1] === "number" &&
+          Number.isFinite(entry[1]) &&
+          entry[1] >= 0,
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeTerminalReadAt(readAt: TerminalReadAt): void {
+  try {
+    window.localStorage.setItem(
+      terminalReadAtStorageKey,
+      JSON.stringify(readAt),
+    );
+  } catch {
+    // Read receipts are a UI convenience and can be rebuilt from live status.
+  }
+}
+
+function pruneTerminalReadAt(
+  current: TerminalReadAt,
+  sessions: SessionConfig[],
+): TerminalReadAt {
+  const validKeys = new Set(
+    sessions.flatMap((session) =>
+      session.terminals.map((terminal) =>
+        terminalAttentionKey(session.id, terminal.id),
+      ),
+    ),
+  );
+  let changed = false;
+  const next: TerminalReadAt = {};
+
+  Object.entries(current).forEach(([key, value]) => {
+    if (validKeys.has(key)) {
+      next[key] = value;
+    } else {
+      changed = true;
+    }
+  });
+
+  return changed ? next : current;
+}
+
+function removeTerminalReadAt(
+  current: TerminalReadAt,
+  predicate: (key: string) => boolean,
+): TerminalReadAt {
+  let changed = false;
+  const next: TerminalReadAt = {};
+
+  Object.entries(current).forEach(([key, value]) => {
+    if (predicate(key)) {
+      changed = true;
+      return;
+    }
+    next[key] = value;
+  });
+
+  return changed ? next : current;
+}
+
+function terminalStatusReadTime(status: RuntimeStatus): number {
+  return Math.max(
+    Date.now(),
+    timestampFromIso(status.lastOutputAt) ?? 0,
+    timestampFromIso(status.stoppedAt) ?? 0,
+    timestampFromIso(status.startedAt) ?? 0,
+  );
+}
+
+function documentVisible(): boolean {
+  return typeof document === "undefined" || !document.hidden;
 }
 
 function syncActiveTerminalIds(
@@ -136,9 +231,8 @@ export function useAppController() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null,
   );
-  const [activityAcknowledgedAt, setActivityAcknowledgedAt] = useState<
-    Record<string, number>
-  >({});
+  const [terminalReadAt, setTerminalReadAt] =
+    useState<TerminalReadAt>(readTerminalReadAt);
   const [activityNow, setActivityNow] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
   const [actionTerminalKey, setActionTerminalKey] = useState<string | null>(
@@ -151,8 +245,10 @@ export function useAppController() {
     useState<TerminalInputRequest | null>(null);
   const [terminalSize, setTerminalSize] = useState<TerminalSize | null>(null);
   const sessionsRef = useRef<SessionConfig[]>([]);
+  const selectedSessionIdRef = useRef<string | null>(null);
   const statusesRef = useRef<Record<string, RuntimeStatus>>({});
   const terminalStatusesRef = useRef<TerminalStatusesBySession>({});
+  const activeTerminalIdsRef = useRef<ActiveTerminalIds>({});
   const statusRefreshInFlightRef = useRef(false);
   const activityOutputFlushTimerRef = useRef<number | null>(null);
   const pendingActivityOutputsRef = useRef<
@@ -203,15 +299,68 @@ export function useAppController() {
     [selectedSessionId, selectedTerminalId],
   );
 
-  const outputActivities = useMemo(
+  const terminalAttention = useMemo<TerminalAttentionBySession>(
     () =>
-      collectOutputActivities(
+      collectTerminalAttention(
         sessions,
-        statuses,
-        activityAcknowledgedAt,
+        terminalStatuses,
+        terminalReadAt,
         activityNow,
       ),
-    [activityAcknowledgedAt, activityNow, sessions, statuses],
+    [activityNow, sessions, terminalReadAt, terminalStatuses],
+  );
+  const sessionAttention = useMemo<SessionAttentionById>(
+    () => collectSessionAttention(sessions, terminalAttention),
+    [sessions, terminalAttention],
+  );
+  const selectedTerminalAttention = selectedSessionId
+    ? (terminalAttention[selectedSessionId] ?? {})
+    : {};
+
+  useEffect(() => {
+    writeTerminalReadAt(terminalReadAt);
+  }, [terminalReadAt]);
+
+  useEffect(() => {
+    selectedSessionIdRef.current = selectedSessionId;
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    activeTerminalIdsRef.current = activeTerminalIds;
+  }, [activeTerminalIds]);
+
+  const markTerminalReadAt = useCallback(
+    (sessionId: string, terminalId: string, readAt = Date.now()) => {
+      const key = terminalAttentionKey(sessionId, terminalId);
+      setTerminalReadAt((current) => {
+        if ((current[key] ?? 0) >= readAt) {
+          return current;
+        }
+
+        const next = { ...current, [key]: readAt };
+        return next;
+      });
+    },
+    [],
+  );
+
+  const markVisibleTerminalReadAt = useCallback(
+    (sessionId: string, terminalId: string, readAt = Date.now()) => {
+      const session = sessionsRef.current.find((item) => item.id === sessionId);
+      const activeTerminalId =
+        activeTerminalIdsRef.current[sessionId] ??
+        session?.terminals[0]?.id ??
+        null;
+
+      if (
+        documentVisible() &&
+        selectedSessionIdRef.current === sessionId &&
+        activeTerminalId === terminalId
+      ) {
+        markTerminalReadAt(sessionId, terminalId, readAt);
+      }
+    },
+    [markTerminalReadAt],
   );
 
   const updateSessionStatus = useCallback((status: RuntimeStatus) => {
@@ -277,33 +426,32 @@ export function useAppController() {
     [recomputeSessionStatus],
   );
 
-  const acknowledgeActivity = useCallback((sessionId: string) => {
-    const acknowledgedAt = Date.now();
-    setActivityAcknowledgedAt((current) => ({
-      ...current,
-      [sessionId]: acknowledgedAt,
-    }));
-    setActivityNow(acknowledgedAt);
-  }, []);
-
-  const selectSession = useCallback(
-    (sessionId: string) => {
-      setSelectedSessionId(sessionId);
-      acknowledgeActivity(sessionId);
+  const handleTerminalStatus = useCallback(
+    (status: RuntimeStatus) => {
+      updateTerminalStatus(status);
     },
-    [acknowledgeActivity],
+    [updateTerminalStatus],
   );
+
+  const selectSession = useCallback((sessionId: string) => {
+    selectedSessionIdRef.current = sessionId;
+    setSelectedSessionId(sessionId);
+  }, []);
 
   const selectTerminal = useCallback(
     (sessionId: string, terminalId: string) => {
+      selectedSessionIdRef.current = sessionId;
+      activeTerminalIdsRef.current = {
+        ...activeTerminalIdsRef.current,
+        [sessionId]: terminalId,
+      };
       setActiveTerminalIds((current) => ({
         ...current,
         [sessionId]: terminalId,
       }));
       setSelectedSessionId(sessionId);
-      acknowledgeActivity(sessionId);
     },
-    [acknowledgeActivity],
+    [],
   );
 
   const upsertSession = useCallback(
@@ -384,25 +532,9 @@ export function useAppController() {
   }, [loadSessions]);
 
   useEffect(() => {
-    if (selectedSessionId) {
-      acknowledgeActivity(selectedSessionId);
-    }
-  }, [acknowledgeActivity, selectedSessionId]);
-
-  useEffect(() => {
     sessionsRef.current = sessions;
-    const sessionIds = new Set(sessions.map((session) => session.id));
-    setActivityAcknowledgedAt((current) => {
-      let changed = false;
-      const next: Record<string, number> = {};
-      Object.entries(current).forEach(([sessionId, acknowledgedAt]) => {
-        if (sessionIds.has(sessionId)) {
-          next[sessionId] = acknowledgedAt;
-        } else {
-          changed = true;
-        }
-      });
-      return changed ? next : current;
+    setTerminalReadAt((current) => {
+      return pruneTerminalReadAt(current, sessions);
     });
     setActiveTerminalIds((current) => syncActiveTerminalIds(current, sessions));
   }, [sessions]);
@@ -522,15 +654,50 @@ export function useAppController() {
     }
   }, []);
 
+  const reloadSessionsForStreamError = useCallback(() => {
+    void loadSessions();
+  }, [loadSessions]);
+
   const sessionStream = useSessionStream({
     activeTerminal,
+    onConfigStale: reloadSessionsForStreamError,
     onError: setTerminalError,
     onOutput: handleActivityOutput,
     onSessionStatus: updateSessionStatus,
-    onTerminalStatus: updateTerminalStatus,
+    onTerminalStatus: handleTerminalStatus,
     terminalStream,
     terminalTargets,
   });
+
+  const sendTerminalInput = useCallback(
+    (sessionId: string, terminalId: string, data: string): boolean => {
+      const sent = sessionStream.sendInput(sessionId, terminalId, data);
+      if (sent) {
+        markTerminalReadAt(sessionId, terminalId);
+      }
+      return sent;
+    },
+    [markTerminalReadAt, sessionStream.sendInput],
+  );
+
+  const requestTerminalSnapshot = useCallback(
+    (
+      sessionId: string,
+      terminalId: string,
+      cols: number,
+      rows: number,
+      options?: TerminalSnapshotRequestOptions,
+    ): boolean =>
+      sessionStream.requestSnapshot(sessionId, terminalId, cols, rows, options),
+    [sessionStream.requestSnapshot],
+  );
+
+  const markVisibleTerminalOutputApplied = useCallback(
+    (sessionId: string, terminalId: string) => {
+      markVisibleTerminalReadAt(sessionId, terminalId);
+    },
+    [markVisibleTerminalReadAt],
+  );
 
   useEffect(() => {
     const timerId = window.setInterval(() => {
@@ -572,6 +739,13 @@ export function useAppController() {
           { method: "POST", ...startOptions },
         );
         updateTerminalStatus(data.status);
+        if (action === "stop") {
+          markTerminalReadAt(
+            sessionId,
+            terminalId,
+            terminalStatusReadTime(data.status),
+          );
+        }
         if (data.sessionStatus) {
           updateSessionStatus(data.sessionStatus);
         }
@@ -585,7 +759,12 @@ export function useAppController() {
         setActionTerminalKey(null);
       }
     },
-    [terminalSize, updateSessionStatus, updateTerminalStatus],
+    [
+      markTerminalReadAt,
+      terminalSize,
+      updateSessionStatus,
+      updateTerminalStatus,
+    ],
   );
 
   const createSession = useCallback(
@@ -637,11 +816,17 @@ export function useAppController() {
         },
       );
       upsertSession(data.session);
+      selectedSessionIdRef.current = sessionId;
+      activeTerminalIdsRef.current = {
+        ...activeTerminalIdsRef.current,
+        [sessionId]: data.terminal.id,
+      };
       setActiveTerminalIds((current) => ({
         ...current,
         [sessionId]: data.terminal.id,
       }));
       setSelectedSessionId(sessionId);
+      markTerminalReadAt(sessionId, data.terminal.id);
       if (data.status) {
         updateTerminalStatus(data.status);
       }
@@ -650,7 +835,13 @@ export function useAppController() {
       }
       return data.terminal;
     },
-    [terminalSize, updateSessionStatus, updateTerminalStatus, upsertSession],
+    [
+      markTerminalReadAt,
+      terminalSize,
+      updateSessionStatus,
+      updateTerminalStatus,
+      upsertSession,
+    ],
   );
 
   const updateTerminal = useCallback(
@@ -703,6 +894,10 @@ export function useAppController() {
         terminalStatusesRef.current = next;
         return next;
       });
+      setTerminalReadAt((current) => {
+        const key = terminalAttentionKey(sessionId, terminalId);
+        return removeTerminalReadAt(current, (itemKey) => itemKey === key);
+      });
       setActiveTerminalIds((current) => ({
         ...current,
         [sessionId]: nextActiveTerminalIdAfterDelete(
@@ -748,15 +943,11 @@ export function useAppController() {
         delete terminalStatusesRef.current[sessionId];
         return next;
       });
-      setActiveTerminalIds((current) => {
-        const next = { ...current };
-        delete next[sessionId];
-        return next;
+      setTerminalReadAt((current) => {
+        const prefix = `${sessionId}/`;
+        return removeTerminalReadAt(current, (key) => key.startsWith(prefix));
       });
-      setActivityAcknowledgedAt((current) => {
-        if (current[sessionId] === undefined) {
-          return current;
-        }
+      setActiveTerminalIds((current) => {
         const next = { ...current };
         delete next[sessionId];
         return next;
@@ -797,20 +988,23 @@ export function useAppController() {
     deleteTerminal,
     loadSessions,
     loading,
-    outputActivities,
     prompts,
     promptsLoaded,
+    markVisibleTerminalOutputApplied,
     requestTerminalInput,
+    requestTerminalSnapshot,
     runTerminalAction,
     selectedSession,
     selectedSessionId,
     selectedStatus,
     selectedTerminal,
     selectedTerminalId,
+    selectedTerminalAttention,
     selectedTerminalStatus,
     selectedTerminalStatuses,
     selectSession,
     selectTerminal,
+    sessionAttention,
     sessionError,
     setTerminalError,
     setTerminalSize,
@@ -820,8 +1014,9 @@ export function useAppController() {
     terminalInputRequest,
     terminalError,
     promptError,
-    sendTerminalInput: sessionStream.sendInput,
+    sendTerminalInput,
     sendTerminalResize: sessionStream.sendResize,
+    terminalAttention,
     terminalStatuses,
     terminalStream,
     updatePrompts,

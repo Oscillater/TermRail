@@ -42,6 +42,28 @@ button {
   font: inherit;
 }
 
+@keyframes unread-attention-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(39, 150, 111, 0.18);
+  }
+
+  50% {
+    box-shadow: 0 0 0 4px rgba(39, 150, 111, 0.12);
+  }
+}
+
+@keyframes unread-badge-pulse {
+  0%,
+  100% {
+    filter: saturate(1);
+  }
+
+  50% {
+    filter: saturate(1.35);
+  }
+}
+
 .app-shell {
   --prompt-panel-width: minmax(280px, 340px);
   --prompt-row-size: minmax(340px, auto);
@@ -265,6 +287,18 @@ button {
   color: #59646f;
 }
 
+.activity-item.unread {
+  border-color: #74d3ad;
+  background: #ecfbf3;
+  color: #164c36;
+}
+
+.activity-item.ready {
+  border-color: #c8e9d7;
+  background: #f2fbf6;
+  color: #2d5d47;
+}
+
 .activity-item.quiet {
   border-color: #cbd8d5;
   background: #edf4f2;
@@ -316,6 +350,17 @@ button {
 .activity-state.quiet {
   background: #dcefe8;
   color: #176148;
+}
+
+.activity-state.unread {
+  background: #c4f1d8;
+  color: #0e673f;
+  animation: unread-badge-pulse 1.8s ease-in-out infinite;
+}
+
+.activity-state.ready {
+  background: #def3e8;
+  color: #256044;
 }
 
 .activity-state.working {
@@ -670,10 +715,24 @@ h3 {
   background: #ffffff;
   font-size: 13px;
   line-height: 1.35;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    box-shadow 140ms ease;
 }
 
 .session-item.selected {
   border-color: #3f8174;
+}
+
+.session-item.unread-attention {
+  border-color: #74d3ad;
+  background: #effbf5;
+  animation: unread-attention-pulse 1.8s ease-in-out infinite;
+}
+
+.session-item.unread-attention.selected {
+  border-color: #27966f;
 }
 
 .session-item.selected::before {
@@ -686,6 +745,10 @@ h3 {
   width: 3px;
   background: #3f8174;
   pointer-events: none;
+}
+
+.session-item.unread-attention::before {
+  background: #27966f;
 }
 
 .session-select {
@@ -702,6 +765,10 @@ h3 {
 
 .session-select:hover {
   background: #f3f7f6;
+}
+
+.session-item.unread-attention .session-select:hover {
+  background: #e4f8ee;
 }
 
 .session-title-row {
@@ -757,6 +824,25 @@ h3 {
 .activity-badge.quiet {
   background: #edf4f2;
   color: #2f6258;
+}
+
+.activity-badge.unread {
+  border-color: #70d2aa;
+  background: #c8f4dc;
+  color: #0e673f;
+  animation: unread-badge-pulse 1.8s ease-in-out infinite;
+}
+
+.activity-badge.ready {
+  border-color: #b7e5cc;
+  background: #edf9f2;
+  color: #246346;
+}
+
+.activity-badge.done {
+  border-color: #b7e5cc;
+  background: #edf9f2;
+  color: #246346;
 }
 
 .activity-badge.running,
@@ -870,11 +956,36 @@ h3 {
   border: 1px solid #cbd2da;
   border-radius: 7px;
   background: #ffffff;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    box-shadow 140ms ease;
 }
 
 .terminal-tab.selected {
   border-color: #3f8174;
   background: #eef7f4;
+}
+
+.terminal-tab.ready {
+  border-color: #b7e5cc;
+  background: #f2fbf6;
+}
+
+.terminal-tab.done {
+  border-color: #9bdfbd;
+  background: #eefbf4;
+}
+
+.terminal-tab.unread-attention {
+  border-color: #60cfa3;
+  background: #e8faef;
+  animation: unread-attention-pulse 1.8s ease-in-out infinite;
+}
+
+.terminal-tab.selected.unread-attention {
+  border-color: #27966f;
+  background: #def7e9;
 }
 
 .terminal-tab-button,
@@ -902,6 +1013,11 @@ h3 {
   background: #eef4f3;
 }
 
+.terminal-tab.unread-attention .terminal-tab-button:hover,
+.terminal-tab.unread-attention .terminal-tab-close:hover {
+  background: #d9f5e6;
+}
+
 .terminal-tab-dot {
   flex: 0 0 auto;
   width: 7px;
@@ -915,6 +1031,7 @@ h3 {
 }
 
 .terminal-tab-name {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   font-size: 12px;
@@ -922,6 +1039,38 @@ h3 {
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.terminal-tab-state {
+  flex: 0 0 auto;
+  min-width: 42px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 2px 5px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.terminal-tab-state.ready {
+  border-color: #b7e5cc;
+  background: #ddf4e7;
+  color: #256044;
+}
+
+.terminal-tab-state.done {
+  border-color: #9bdfbd;
+  background: #d7f3e2;
+  color: #185a39;
+}
+
+.terminal-tab-state.unread {
+  border-color: #60cfa3;
+  background: #bef0d4;
+  color: #0e673f;
+  animation: unread-badge-pulse 1.8s ease-in-out infinite;
 }
 
 .terminal-tab-close {
@@ -1025,6 +1174,7 @@ h3 {
 
 .terminal-host {
   grid-column: 1;
+  grid-row: 1;
   width: 100%;
   height: 100%;
   min-height: 0;
@@ -1033,13 +1183,21 @@ h3 {
   padding: 10px;
 }
 
+.terminal-host.staging {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .terminal-host .xterm {
   width: 100%;
   height: 100%;
 }
 
-.terminal-frame.restoring .terminal-host,
-.terminal-frame.restoring .terminal-scroll-rail {
+.terminal-frame.output-shielded .terminal-host .xterm {
+  opacity: 0;
+}
+
+.terminal-frame.output-shielded .terminal-scroll-rail {
   visibility: hidden;
 }
 
@@ -1069,7 +1227,7 @@ h3 {
 .terminal-empty-overlay {
   position: absolute;
   inset: 1px 23px 1px 1px;
-  z-index: 2;
+  z-index: 10;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1096,6 +1254,16 @@ h3 {
   color: #9aa4af;
   font-size: 13px;
   pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-badge.unread,
+  .activity-state.unread,
+  .session-item.unread-attention,
+  .terminal-tab.unread-attention,
+  .terminal-tab-state.unread {
+    animation: none;
+  }
 }
 
 .terminal-scroll-control {

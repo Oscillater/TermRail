@@ -7,7 +7,8 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -p tsconfig.json && vite build",
     "check": "tsc -p tsconfig.json --noEmit",
-    "lint": "npm run check"
+    "lint": "npm run check",
+    "test": "vitest run"
   },
   "dependencies": {
     "@termrail/shared": "file:../shared",
@@ -21,7 +22,11 @@
     "vite": "^6.0.7"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.0",
     "@types/react": "^19.0.7",
-    "@types/react-dom": "^19.0.3"
+    "@types/react-dom": "^19.0.3",
+    "jsdom": "^26.1.0",
+    "vitest": "^3.2.6"
   }
 }

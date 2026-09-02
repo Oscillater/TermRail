@@ -3,6 +3,8 @@ import { wsUrl } from "../api";
 import type {
   RuntimeStatus,
   StreamConnectionState,
+  TerminalSnapshotRequestOptions,
+  TerminalSize,
   TerminalTarget,
   WsServerMessage,
 } from "../types";
@@ -10,6 +12,7 @@ import type { TerminalStream } from "../terminalStream";
 
 type UseSessionStreamOptions = {
   activeTerminal: TerminalTarget | null;
+  onConfigStale: () => void;
   onError: (message: string | null) => void;
   onOutput: (
     sessionId: string,
@@ -27,7 +30,16 @@ type JsonClientMessage =
       type: "subscribe";
       sessionId: string;
       terminalId: string;
-      includeBuffer: boolean;
+    }
+  | {
+      type: "snapshot";
+      sessionId: string;
+      terminalId: string;
+      requestId: string;
+      cols: number;
+      rows: number;
+      mode?: TerminalSnapshotRequestOptions["mode"];
+      minSeq?: number;
     }
   | { type: "unsubscribe"; sessionId: string; terminalId: string }
   | { type: "input"; sessionId: string; terminalId: string; data: string }
@@ -53,8 +65,22 @@ function sameTarget(
   );
 }
 
+type LatestSeqState = {
+  runtimeId: number | null;
+  seq: number;
+};
+
+function shouldAcceptSeq(
+  latest: LatestSeqState | undefined,
+  runtimeId: number | null,
+  seq: number,
+): boolean {
+  return !latest || latest.runtimeId !== runtimeId || seq > latest.seq;
+}
+
 export function useSessionStream({
   activeTerminal,
+  onConfigStale,
   onError,
   onOutput,
   onSessionStatus,
@@ -65,7 +91,9 @@ export function useSessionStream({
   const [connectionState, setConnectionState] =
     useState<StreamConnectionState>("idle");
   const activeTerminalRef = useRef<TerminalTarget | null>(activeTerminal);
-  const latestSeqByTerminalRef = useRef<Record<string, number>>({});
+  const latestSeqByTerminalRef = useRef<Record<string, LatestSeqState>>({});
+  const pendingSnapshotRequestsRef = useRef<Record<string, string>>({});
+  const snapshotRequestCounterRef = useRef(0);
   const socketRef = useRef<WebSocket | null>(null);
 
   const terminalTargetsKey = useMemo(
@@ -85,6 +113,79 @@ export function useSessionStream({
     socket.send(JSON.stringify(message));
     return true;
   }, []);
+
+  const syncLatestSeqRuntime = useCallback((status: RuntimeStatus) => {
+    const terminalId = status.terminalId;
+    if (!terminalId) {
+      return;
+    }
+
+    const key = targetKey({ sessionId: status.sessionId, terminalId });
+    if (latestSeqByTerminalRef.current[key]?.runtimeId === status.runtimeId) {
+      return;
+    }
+
+    latestSeqByTerminalRef.current = {
+      ...latestSeqByTerminalRef.current,
+      [key]: { runtimeId: status.runtimeId, seq: 0 },
+    };
+  }, []);
+
+  const sendSnapshotRequest = useCallback(
+    (
+      socket: WebSocket,
+      target: TerminalTarget,
+      size: TerminalSize,
+      options: TerminalSnapshotRequestOptions = {},
+    ): boolean => {
+      if (socket.readyState !== WebSocket.OPEN) {
+        return false;
+      }
+
+      snapshotRequestCounterRef.current += 1;
+      const requestId = `${Date.now()}:${snapshotRequestCounterRef.current}`;
+      const key = targetKey(target);
+      const latestSeq = latestSeqByTerminalRef.current[key]?.seq ?? 0;
+      const minSeq = options.minSeq ?? (latestSeq > 0 ? latestSeq : undefined);
+      pendingSnapshotRequestsRef.current[key] = requestId;
+      socket.send(
+        JSON.stringify({
+          type: "snapshot",
+          sessionId: target.sessionId,
+          terminalId: target.terminalId,
+          requestId,
+          cols: size.cols,
+          rows: size.rows,
+          mode: options.mode ?? "tail",
+          minSeq,
+        } satisfies JsonClientMessage),
+      );
+      return true;
+    },
+    [],
+  );
+
+  const requestSnapshot = useCallback(
+    (
+      sessionId: string,
+      terminalId: string,
+      cols: number,
+      rows: number,
+      options?: TerminalSnapshotRequestOptions,
+    ): boolean => {
+      const socket = socketRef.current;
+      if (!socket) {
+        return false;
+      }
+      return sendSnapshotRequest(
+        socket,
+        { sessionId, terminalId },
+        { cols, rows },
+        options,
+      );
+    },
+    [sendSnapshotRequest],
+  );
 
   const sendInput = useCallback(
     (sessionId: string, terminalId: string, data: string): boolean =>
@@ -111,10 +212,16 @@ export function useSessionStream({
         activeKeys.has(key),
       ),
     );
+    pendingSnapshotRequestsRef.current = Object.fromEntries(
+      Object.entries(pendingSnapshotRequestsRef.current).filter(([key]) =>
+        activeKeys.has(key),
+      ),
+    );
 
     if (parsedTargets.length === 0) {
       setConnectionState("idle");
       latestSeqByTerminalRef.current = {};
+      pendingSnapshotRequestsRef.current = {};
       return undefined;
     }
 
@@ -132,21 +239,19 @@ export function useSessionStream({
         if (closed || socket !== nextSocket) {
           return;
         }
+
         latestSeqByTerminalRef.current = {};
+        pendingSnapshotRequestsRef.current = {};
         setConnectionState("connected");
         onError(null);
+
         parsedTargets.forEach((target) => {
-          const includeBuffer = sameTarget(target, activeTerminalRef.current);
-          if (includeBuffer) {
-            terminalStream.clearSnapshot(target);
-          }
           nextSocket.send(
             JSON.stringify({
               type: "subscribe",
               sessionId: target.sessionId,
               terminalId: target.terminalId,
-              includeBuffer,
-            }),
+            } satisfies JsonClientMessage),
           );
         });
       });
@@ -165,54 +270,108 @@ export function useSessionStream({
 
         switch (message.type) {
           case "subscribed":
+            syncLatestSeqRuntime(message.status);
             onTerminalStatus(message.status);
-            const subscribedTarget = {
+            break;
+          case "terminal.snapshot": {
+            const snapshotTarget = {
               sessionId: message.sessionId,
               terminalId: message.terminalId,
             };
-            if (sameTarget(subscribedTarget, activeTerminalRef.current)) {
+            const key = targetKey(snapshotTarget);
+            if (pendingSnapshotRequestsRef.current[key] !== message.requestId) {
+              break;
+            }
+
+            delete pendingSnapshotRequestsRef.current[key];
+            if (
+              message.complete &&
+              shouldAcceptSeq(
+                latestSeqByTerminalRef.current[key],
+                message.runtimeId,
+                message.seq,
+              )
+            ) {
+              latestSeqByTerminalRef.current = {
+                ...latestSeqByTerminalRef.current,
+                [key]: { runtimeId: message.runtimeId, seq: message.seq },
+              };
+            }
+            onTerminalStatus(message.status);
+
+            if (sameTarget(snapshotTarget, activeTerminalRef.current)) {
               terminalStream.publish({
                 type: "snapshot",
                 sessionId: message.sessionId,
                 terminalId: message.terminalId,
-                buffer: message.buffer,
+                runtimeId: message.runtimeId,
+                format: message.format,
+                mode: message.mode,
+                data: message.data,
+                seq: message.seq,
+                minSeq: message.minSeq,
+                complete: message.complete,
+                cols: message.cols,
+                rows: message.rows,
+                screenRevision: message.screenRevision,
+                bufferType: message.bufferType,
               });
             }
             break;
-          case "terminal.output": {
-            const key = targetKey({
+          }
+          case "terminal.screen-progress": {
+            const progressTarget = {
               sessionId: message.sessionId,
               terminalId: message.terminalId,
-            });
-            if (typeof message.seq === "number") {
-              const latestSeq = latestSeqByTerminalRef.current[key];
-              if (latestSeq !== undefined && message.seq <= latestSeq) {
-                break;
-              }
-              latestSeqByTerminalRef.current = {
-                ...latestSeqByTerminalRef.current,
-                [key]: message.seq,
-              };
+            };
+            if (sameTarget(progressTarget, activeTerminalRef.current)) {
+              terminalStream.publish({
+                type: "progress",
+                sessionId: message.sessionId,
+                terminalId: message.terminalId,
+                runtimeId: message.runtimeId,
+                seq: message.seq,
+                screenRevision: message.screenRevision,
+                bufferType: message.bufferType,
+                cols: message.cols,
+                rows: message.rows,
+              });
             }
-
-            onOutput(message.sessionId, message.terminalId, message.at);
+            break;
+          }
+          case "terminal.output": {
             const outputTarget = {
               sessionId: message.sessionId,
               terminalId: message.terminalId,
             };
+            const key = targetKey(outputTarget);
+            const latestSeq = latestSeqByTerminalRef.current[key];
+            if (!shouldAcceptSeq(latestSeq, message.runtimeId, message.seq)) {
+              break;
+            }
+
+            onOutput(message.sessionId, message.terminalId, message.at);
+
+            latestSeqByTerminalRef.current = {
+              ...latestSeqByTerminalRef.current,
+              [key]: { runtimeId: message.runtimeId, seq: message.seq },
+            };
+
             if (sameTarget(outputTarget, activeTerminalRef.current)) {
               terminalStream.publish({
                 type: "output",
                 sessionId: message.sessionId,
                 terminalId: message.terminalId,
+                runtimeId: message.runtimeId,
                 data: message.data,
-                at: message.at ?? new Date().toISOString(),
-                seq: message.seq ?? 0,
+                at: message.at,
+                seq: message.seq,
               });
             }
             break;
           }
           case "terminal.status":
+            syncLatestSeqRuntime(message.status);
             onTerminalStatus(message.status);
             break;
           case "session.status":
@@ -220,6 +379,12 @@ export function useSessionStream({
             break;
           case "error":
             onError(message.error.message);
+            if (
+              message.error.code === "TERMINAL_NOT_FOUND" ||
+              message.error.code === "SESSION_NOT_FOUND"
+            ) {
+              onConfigStale();
+            }
             break;
           case "unsubscribed":
             break;
@@ -254,7 +419,7 @@ export function useSessionStream({
               type: "unsubscribe",
               sessionId: target.sessionId,
               terminalId: target.terminalId,
-            }),
+            } satisfies JsonClientMessage),
           );
         });
       }
@@ -265,34 +430,19 @@ export function useSessionStream({
     };
   }, [
     onError,
+    onConfigStale,
     onOutput,
     onSessionStatus,
     onTerminalStatus,
+    sendSnapshotRequest,
+    syncLatestSeqRuntime,
     terminalStream,
     terminalTargetsKey,
   ]);
 
-  useEffect(() => {
-    if (!activeTerminal) {
-      return;
-    }
-
-    const parsedTargets = JSON.parse(terminalTargetsKey) as TerminalTarget[];
-    if (!parsedTargets.some((target) => sameTarget(target, activeTerminal))) {
-      return;
-    }
-
-    terminalStream.clearSnapshot(activeTerminal);
-    sendJson({
-      type: "subscribe",
-      sessionId: activeTerminal.sessionId,
-      terminalId: activeTerminal.terminalId,
-      includeBuffer: true,
-    });
-  }, [activeTerminal, sendJson, terminalStream, terminalTargetsKey]);
-
   return {
     connectionState,
+    requestSnapshot,
     sendInput,
     sendResize,
   };

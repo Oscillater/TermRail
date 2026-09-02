@@ -5,13 +5,16 @@ export type {
   RuntimeStatus,
   SessionConfig,
   TerminalConfig,
+  TerminalBufferType,
   TerminalOutputEvent,
+  TerminalScreenProgress,
+  TerminalSnapshotMode,
   TerminalSize,
   WsClientMessage,
   WsServerMessage,
 } from "@termrail/shared";
 
-import type { RuntimeStatus } from "@termrail/shared";
+import type { RuntimeStatus, TerminalSnapshotMode } from "@termrail/shared";
 
 export type SessionsResponse = {
   prompts?: import("@termrail/shared").PromptExample[];
@@ -57,6 +60,10 @@ export type TerminalInputRequest = {
   data: string;
 };
 
+export type TerminalFocusRequest = TerminalTarget & {
+  id: number;
+};
+
 export type TerminalScrollState = {
   viewportY: number;
   baseY: number;
@@ -65,6 +72,11 @@ export type TerminalScrollState = {
 export type TerminalTarget = {
   sessionId: string;
   terminalId: string;
+};
+
+export type TerminalSnapshotRequestOptions = {
+  mode?: TerminalSnapshotMode;
+  minSeq?: number;
 };
 
 export type StreamConnectionState =
@@ -78,6 +90,34 @@ export type OutputActivity = {
 };
 
 export type OutputActivities = Record<string, OutputActivity>;
+
+export type TerminalAttentionState =
+  "idle" | "running" | "working" | "ready" | "done" | "stopped";
+
+export type TerminalAttention = {
+  state: TerminalAttentionState;
+  unread: boolean;
+  updatedAt: number;
+};
+
+export type TerminalAttentionBySession = Record<
+  string,
+  Record<string, TerminalAttention>
+>;
+
+export type SessionAttention = {
+  terminalCount: number;
+  unreadCount: number;
+  unreadReadyCount: number;
+  unreadDoneCount: number;
+  readyCount: number;
+  workingCount: number;
+  runningCount: number;
+  stoppedCount: number;
+  updatedAt: number;
+};
+
+export type SessionAttentionById = Record<string, SessionAttention>;
 
 export type DirectoryEntry = {
   name: string;

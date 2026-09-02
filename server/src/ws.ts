@@ -1,20 +1,49 @@
 import type { Server } from "node:http";
-import { terminalSizeLimits, type WsClientMessage } from "@termrail/shared";
+import {
+  terminalSizeLimits,
+  type TerminalSnapshotMode,
+  type WsClientMessage,
+} from "@termrail/shared";
 import { WebSocket, WebSocketServer } from "ws";
 import { isAuthorized } from "./auth.js";
 import type { ConfigStore } from "./configStore.js";
 import { HttpError } from "./errors.js";
 import type { SessionManager } from "./sessionManager.js";
 
-type ClientMessage = WsClientMessage & {
-  includeBuffer?: boolean;
-  terminalId: string;
-};
+type ClientMessage = WsClientMessage & { terminalId: string };
 
 type JsonMessage = Record<string, unknown>;
 
 function isRecord(value: unknown): value is JsonMessage {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseSnapshotMode(value: unknown): TerminalSnapshotMode {
+  if (value === undefined) {
+    return "tail";
+  }
+  if (value === "tail" || value === "full") {
+    return value;
+  }
+  throw new HttpError(
+    400,
+    "INVALID_WS_MESSAGE",
+    'snapshot mode must be "tail" or "full"',
+  );
+}
+
+function parseSnapshotMinSeq(value: unknown): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new HttpError(
+      400,
+      "INVALID_WS_MESSAGE",
+      "snapshot minSeq must be a non-negative integer",
+    );
+  }
+  return value;
 }
 
 function parseClientMessage(raw: WebSocket.RawData): ClientMessage {
@@ -47,21 +76,54 @@ function parseClientMessage(raw: WebSocket.RawData): ClientMessage {
 
   switch (parsed.type) {
     case "subscribe":
-      if (
-        parsed.includeBuffer !== undefined &&
-        typeof parsed.includeBuffer !== "boolean"
-      ) {
-        throw new HttpError(
-          400,
-          "INVALID_WS_MESSAGE",
-          "subscribe includeBuffer must be a boolean",
-        );
-      }
       return {
         type: "subscribe",
         sessionId: parsed.sessionId,
         terminalId,
-        includeBuffer: parsed.includeBuffer ?? true,
+      };
+    case "snapshot":
+      if (typeof parsed.requestId !== "string" || !parsed.requestId) {
+        throw new HttpError(
+          400,
+          "INVALID_WS_MESSAGE",
+          "snapshot message must include a requestId",
+        );
+      }
+      if (typeof parsed.cols !== "number" || typeof parsed.rows !== "number") {
+        throw new HttpError(
+          400,
+          "INVALID_WS_MESSAGE",
+          "snapshot message must include integer cols and rows",
+        );
+      }
+      if (!Number.isInteger(parsed.cols) || !Number.isInteger(parsed.rows)) {
+        throw new HttpError(
+          400,
+          "INVALID_WS_MESSAGE",
+          "snapshot message must include integer cols and rows",
+        );
+      }
+      if (
+        parsed.cols < terminalSizeLimits.minCols ||
+        parsed.rows < terminalSizeLimits.minRows ||
+        parsed.cols > terminalSizeLimits.maxCols ||
+        parsed.rows > terminalSizeLimits.maxRows
+      ) {
+        throw new HttpError(
+          400,
+          "INVALID_WS_MESSAGE",
+          "snapshot dimensions are out of range",
+        );
+      }
+      return {
+        type: "snapshot",
+        sessionId: parsed.sessionId,
+        terminalId,
+        requestId: parsed.requestId,
+        cols: parsed.cols,
+        rows: parsed.rows,
+        mode: parseSnapshotMode(parsed.mode),
+        minSeq: parseSnapshotMinSeq(parsed.minSeq),
       };
     case "unsubscribe":
       return { type: "unsubscribe", sessionId: parsed.sessionId, terminalId };
@@ -191,7 +253,6 @@ export function attachWebSocketServer(
     ws: WebSocket,
     sessionId: string,
     terminalId: string,
-    includeBuffer: boolean,
   ): void {
     ensureTerminal(sessionId, terminalId);
 
@@ -215,9 +276,43 @@ export function attachWebSocketServer(
       sessionId,
       terminalId,
       status: sessionManager.getStatus(sessionId, terminalId),
-      buffer: includeBuffer
-        ? sessionManager.getBuffer(sessionId, terminalId)
-        : "",
+    });
+  }
+
+  async function snapshot(
+    ws: WebSocket,
+    sessionId: string,
+    terminalId: string,
+    requestId: string,
+    cols: number,
+    rows: number,
+    mode: TerminalSnapshotMode,
+    minSeq: number | undefined,
+  ): Promise<void> {
+    ensureTerminal(sessionId, terminalId);
+    const terminalSnapshot = await sessionManager.getSnapshot(
+      sessionId,
+      terminalId,
+      { requestedSize: { cols, rows }, mode, minSeq },
+    );
+
+    send(ws, {
+      type: "terminal.snapshot",
+      sessionId,
+      terminalId,
+      requestId,
+      status: terminalSnapshot.status,
+      runtimeId: terminalSnapshot.runtimeId,
+      format: terminalSnapshot.format,
+      mode: terminalSnapshot.mode,
+      data: terminalSnapshot.data,
+      seq: terminalSnapshot.seq,
+      minSeq: terminalSnapshot.minSeq,
+      complete: terminalSnapshot.complete,
+      cols: terminalSnapshot.cols,
+      rows: terminalSnapshot.rows,
+      screenRevision: terminalSnapshot.screenRevision,
+      bufferType: terminalSnapshot.bufferType,
     });
   }
 
@@ -265,14 +360,25 @@ export function attachWebSocketServer(
     clients.forEach((ws) => send(ws, payload));
   }
 
-  sessionManager.on("output", ({ sessionId, terminalId, data, at, seq }) => {
-    broadcastTerminal(sessionId, terminalId, {
-      type: "terminal.output",
-      sessionId,
-      terminalId,
-      data,
-      at,
-      seq,
+  sessionManager.on(
+    "output",
+    ({ sessionId, terminalId, runtimeId, data, at, seq }) => {
+      broadcastTerminal(sessionId, terminalId, {
+        type: "terminal.output",
+        sessionId,
+        terminalId,
+        runtimeId,
+        data,
+        at,
+        seq,
+      });
+    },
+  );
+
+  sessionManager.on("screenProgress", (progress) => {
+    broadcastTerminal(progress.sessionId, progress.terminalId, {
+      type: "terminal.screen-progress",
+      ...progress,
     });
   });
 
@@ -301,18 +407,25 @@ export function attachWebSocketServer(
   });
 
   wss.on("connection", (ws) => {
-    ws.on("message", (raw) => {
+    const handleMessage = async (raw: WebSocket.RawData) => {
       try {
         const message = parseClientMessage(raw);
         ensureTerminal(message.sessionId, message.terminalId);
 
         switch (message.type) {
           case "subscribe":
-            subscribe(
+            subscribe(ws, message.sessionId, message.terminalId);
+            break;
+          case "snapshot":
+            await snapshot(
               ws,
               message.sessionId,
               message.terminalId,
-              message.includeBuffer ?? true,
+              message.requestId,
+              message.cols,
+              message.rows,
+              message.mode ?? "tail",
+              message.minSeq,
             );
             break;
           case "unsubscribe":
@@ -342,6 +455,10 @@ export function attachWebSocketServer(
       } catch (error) {
         sendError(ws, error);
       }
+    };
+
+    ws.on("message", (raw) => {
+      void handleMessage(raw);
     });
 
     ws.on("close", () => cleanup(ws));

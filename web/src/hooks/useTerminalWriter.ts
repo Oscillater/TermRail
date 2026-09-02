@@ -1,16 +1,54 @@
-import {
-  type RefObject,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { type RefObject, useCallback, useEffect, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
+import type { TerminalBufferType } from "../types";
 
-const liveTerminalWriteChunkSize = 32 * 1024;
+const liveTerminalWriteChunkSize = 128 * 1024;
 const snapshotTerminalWriteChunkSize = 256 * 1024;
 
-type TerminalWriteOperation = { type: "write"; data: string };
+type TerminalWriteKind = "live" | "snapshot";
+
+type TerminalWriteOperation = {
+  data: string;
+  enqueuedAt: number;
+  kind: TerminalWriteKind;
+  marksApplied: boolean;
+  runtimeId: number | null;
+  seq: number;
+};
+
+export type TerminalWriterBacklog = {
+  oldestPendingAt: number | null;
+  pendingBytes: number;
+};
+
+export type TerminalWriteMetrics = {
+  kind: TerminalWriteKind;
+  pendingBytes: number;
+  runtimeId: number | null;
+  seq: number;
+  writeMs: number;
+};
+
+export type TerminalWriterSeq = {
+  runtimeId: number | null;
+  seq: number;
+};
+
+export type TerminalSnapshotWriterPosition = TerminalWriterSeq & {
+  screenRevision: number;
+  bufferType: TerminalBufferType;
+};
+
+type TerminalWriterEvent = TerminalWriterSeq & {
+  data: string;
+};
+
+type UseTerminalWriterOptions = {
+  onBacklogChange: (backlog: TerminalWriterBacklog) => void;
+  onSnapshotApplied: (position: TerminalSnapshotWriterPosition) => void;
+  onWriteMetrics: (metrics: TerminalWriteMetrics) => void;
+  updateTerminalScrollState: (terminal?: Terminal | null) => void;
+};
 
 function isHighSurrogate(value: number): boolean {
   return value >= 0xd800 && value <= 0xdbff;
@@ -36,35 +74,114 @@ function chunkTerminalData(data: string, chunkSize: number): string[] {
   return chunks;
 }
 
-function writeOperationsFor(data: string): TerminalWriteOperation[] {
-  return chunkTerminalData(data, liveTerminalWriteChunkSize).map((chunk) => ({
-    type: "write",
+function writeOperationsFor({
+  data,
+  runtimeId,
+  seq,
+}: TerminalWriterEvent): TerminalWriteOperation[] {
+  const chunks = chunkTerminalData(data, liveTerminalWriteChunkSize);
+  const enqueuedAt = performance.now();
+  return chunks.map((chunk, index) => ({
     data: chunk,
+    enqueuedAt,
+    kind: "live",
+    marksApplied: index === chunks.length - 1,
+    runtimeId,
+    seq,
   }));
+}
+
+function takeNextWriteOperation(
+  queue: TerminalWriteOperation[],
+): TerminalWriteOperation | null {
+  const first = queue.shift();
+  if (!first || first.kind !== "live") {
+    return first ?? null;
+  }
+
+  const data = [first.data];
+  let length = first.data.length;
+  let marksApplied = first.marksApplied;
+  let seq = first.seq;
+
+  while (queue.length) {
+    const next = queue[0];
+    if (
+      !next ||
+      next.kind !== first.kind ||
+      next.runtimeId !== first.runtimeId ||
+      length + next.data.length > liveTerminalWriteChunkSize
+    ) {
+      break;
+    }
+    queue.shift();
+    data.push(next.data);
+    length += next.data.length;
+    if (next.marksApplied) {
+      marksApplied = true;
+      seq = next.seq;
+    }
+  }
+
+  return {
+    ...first,
+    data: data.join(""),
+    marksApplied,
+    seq,
+  };
 }
 
 export function useTerminalWriter(
   terminalRef: RefObject<Terminal | null>,
-  updateTerminalScrollState: (terminal?: Terminal | null) => void,
+  stagingTerminalRef: RefObject<Terminal | null>,
+  promoteStagingTerminal: () => Terminal | null,
+  {
+    onBacklogChange,
+    onSnapshotApplied,
+    onWriteMetrics,
+    updateTerminalScrollState,
+  }: UseTerminalWriterOptions,
 ) {
-  const [isRestoringOutput, setIsRestoringOutputState] = useState(false);
-  const isRestoringOutputRef = useRef(false);
   const restoreFrameRef = useRef<number | null>(null);
   const writeFrameRef = useRef<number | null>(null);
   const writeGenerationRef = useRef(0);
   const writeInProgressRef = useRef(false);
+  const inFlightOperationRef = useRef<TerminalWriteOperation | null>(null);
   const writeQueueRef = useRef<TerminalWriteOperation[]>([]);
+  const pendingBytesRef = useRef(0);
+  const onBacklogChangeRef = useRef(onBacklogChange);
+  const onSnapshotAppliedRef = useRef(onSnapshotApplied);
+  const onWriteMetricsRef = useRef(onWriteMetrics);
   const flushTerminalWritesRef = useRef<(generation: number) => void>(
     () => undefined,
   );
 
-  const setIsRestoringOutput = useCallback((value: boolean) => {
-    if (isRestoringOutputRef.current === value) {
-      return;
-    }
-    isRestoringOutputRef.current = value;
-    setIsRestoringOutputState(value);
-  }, []);
+  useEffect(() => {
+    onBacklogChangeRef.current = onBacklogChange;
+  }, [onBacklogChange]);
+
+  useEffect(() => {
+    onSnapshotAppliedRef.current = onSnapshotApplied;
+  }, [onSnapshotApplied]);
+
+  useEffect(() => {
+    onWriteMetricsRef.current = onWriteMetrics;
+  }, [onWriteMetrics]);
+
+  const readBacklog = useCallback(
+    (): TerminalWriterBacklog => ({
+      oldestPendingAt:
+        inFlightOperationRef.current?.enqueuedAt ??
+        writeQueueRef.current[0]?.enqueuedAt ??
+        null,
+      pendingBytes: pendingBytesRef.current,
+    }),
+    [],
+  );
+
+  const publishBacklog = useCallback(() => {
+    onBacklogChangeRef.current(readBacklog());
+  }, [readBacklog]);
 
   const cancelScheduledFlush = useCallback(() => {
     if (writeFrameRef.current !== null) {
@@ -83,11 +200,13 @@ export function useTerminalWriter(
   const cancelTerminalWrites = useCallback(() => {
     writeGenerationRef.current += 1;
     writeQueueRef.current = [];
+    pendingBytesRef.current = 0;
     writeInProgressRef.current = false;
-    setIsRestoringOutput(false);
+    inFlightOperationRef.current = null;
     cancelScheduledFlush();
     cancelScheduledRestore();
-  }, [cancelScheduledFlush, cancelScheduledRestore, setIsRestoringOutput]);
+    publishBacklog();
+  }, [cancelScheduledFlush, cancelScheduledRestore, publishBacklog]);
 
   const scheduleTerminalWriteFlush = useCallback(() => {
     if (writeFrameRef.current !== null || writeInProgressRef.current) {
@@ -112,94 +231,166 @@ export function useTerminalWriter(
         return;
       }
 
-      const operation = writeQueueRef.current.shift();
+      const operation = takeNextWriteOperation(writeQueueRef.current);
       if (!operation) {
         return;
       }
 
       writeInProgressRef.current = true;
+      inFlightOperationRef.current = operation;
+      const startedAt = performance.now();
       terminal.write(operation.data, () => {
         if (generation !== writeGenerationRef.current) {
           return;
         }
 
+        pendingBytesRef.current = Math.max(
+          0,
+          pendingBytesRef.current - operation.data.length,
+        );
         writeInProgressRef.current = false;
+        inFlightOperationRef.current = null;
         updateTerminalScrollState(terminal);
-        if (!writeQueueRef.current.length) {
-          return;
+        if (operation.marksApplied) {
+          onWriteMetricsRef.current({
+            kind: operation.kind,
+            pendingBytes: pendingBytesRef.current,
+            runtimeId: operation.runtimeId,
+            seq: operation.seq,
+            writeMs: performance.now() - startedAt,
+          });
         }
+        publishBacklog();
 
-        scheduleTerminalWriteFlush();
+        if (writeQueueRef.current.length) {
+          scheduleTerminalWriteFlush();
+        }
       });
     },
-    [scheduleTerminalWriteFlush, terminalRef, updateTerminalScrollState],
+    [
+      publishBacklog,
+      scheduleTerminalWriteFlush,
+      terminalRef,
+      updateTerminalScrollState,
+    ],
   );
 
   useEffect(() => {
     flushTerminalWritesRef.current = flushTerminalWrites;
   }, [flushTerminalWrites]);
 
-  const queueTerminalWrite = useCallback(
-    (data: string) => {
+  const enqueueTerminalData = useCallback(
+    (operations: TerminalWriteOperation[]) => {
+      pendingBytesRef.current += operations.reduce(
+        (total, operation) => total + operation.data.length,
+        0,
+      );
+      writeQueueRef.current.push(...operations);
+      publishBacklog();
+      scheduleTerminalWriteFlush();
+    },
+    [publishBacklog, scheduleTerminalWriteFlush],
+  );
+
+  const writeLive = useCallback(
+    ({ data, runtimeId, seq }: TerminalWriterEvent) => {
       if (!data) {
         return;
       }
-      writeQueueRef.current.push(...writeOperationsFor(data));
-      scheduleTerminalWriteFlush();
+
+      const operations = writeOperationsFor({ data, runtimeId, seq });
+      enqueueTerminalData(operations);
     },
-    [scheduleTerminalWriteFlush],
+    [enqueueTerminalData],
   );
 
   const restoreTerminalSnapshot = useCallback(
-    (buffer: string) => {
-      const terminal = terminalRef.current;
+    ({
+      bufferType,
+      data,
+      runtimeId,
+      screenRevision,
+      seq,
+    }: TerminalWriterEvent & {
+      bufferType: TerminalBufferType;
+      screenRevision: number;
+    }) => {
+      const terminal = stagingTerminalRef.current;
       writeGenerationRef.current += 1;
       const generation = writeGenerationRef.current;
       writeQueueRef.current = [];
+      pendingBytesRef.current = 0;
+      inFlightOperationRef.current = null;
       cancelScheduledFlush();
       cancelScheduledRestore();
+      publishBacklog();
 
       if (!terminal) {
         writeInProgressRef.current = false;
-        setIsRestoringOutput(false);
         return;
       }
 
       writeInProgressRef.current = true;
-      setIsRestoringOutput(Boolean(buffer));
-      terminal.reset();
 
-      if (!buffer) {
-        writeInProgressRef.current = false;
-        terminal.scrollToBottom();
-        updateTerminalScrollState(terminal);
-        setIsRestoringOutput(false);
-        scheduleTerminalWriteFlush();
-        return;
-      }
-
-      const chunks = chunkTerminalData(buffer, snapshotTerminalWriteChunkSize);
+      const chunks = chunkTerminalData(data, snapshotTerminalWriteChunkSize);
       let chunkIndex = 0;
+
+      const scheduleRestoreFrame = (callback: () => void) => {
+        restoreFrameRef.current = window.requestAnimationFrame(() => {
+          restoreFrameRef.current = null;
+          callback();
+        });
+      };
 
       const finishRestore = () => {
         if (
           generation !== writeGenerationRef.current ||
-          terminal !== terminalRef.current
+          terminal !== stagingTerminalRef.current
         ) {
           return;
         }
 
-        writeInProgressRef.current = false;
         terminal.scrollToBottom();
-        updateTerminalScrollState(terminal);
-        setIsRestoringOutput(false);
-        scheduleTerminalWriteFlush();
+        scheduleRestoreFrame(() => {
+          if (
+            generation !== writeGenerationRef.current ||
+            terminal !== stagingTerminalRef.current
+          ) {
+            return;
+          }
+
+          const promotedTerminal = promoteStagingTerminal();
+          if (!promotedTerminal) {
+            writeInProgressRef.current = false;
+            return;
+          }
+          promotedTerminal.scrollToBottom();
+          promotedTerminal.refresh(0, Math.max(0, promotedTerminal.rows - 1));
+          scheduleRestoreFrame(() => {
+            if (
+              generation !== writeGenerationRef.current ||
+              promotedTerminal !== terminalRef.current
+            ) {
+              return;
+            }
+
+            writeInProgressRef.current = false;
+            updateTerminalScrollState(promotedTerminal);
+            onSnapshotAppliedRef.current({
+              runtimeId,
+              seq,
+              screenRevision,
+              bufferType,
+            });
+            scheduleTerminalWriteFlush();
+          });
+        });
       };
 
       const writeNextChunk = () => {
         if (
           generation !== writeGenerationRef.current ||
-          terminal !== terminalRef.current
+          terminal !== stagingTerminalRef.current
         ) {
           return;
         }
@@ -214,17 +405,30 @@ export function useTerminalWriter(
         terminal.write(chunk, writeNextChunk);
       };
 
-      // Let React apply the restoring class before xterm mutates its viewport.
-      restoreFrameRef.current = window.requestAnimationFrame(() => {
-        restoreFrameRef.current = null;
+      scheduleRestoreFrame(() => {
+        if (
+          generation !== writeGenerationRef.current ||
+          terminal !== stagingTerminalRef.current
+        ) {
+          return;
+        }
+
+        terminal.reset();
+        if (!data) {
+          finishRestore();
+          return;
+        }
+
         writeNextChunk();
       });
     },
     [
       cancelScheduledFlush,
       cancelScheduledRestore,
+      publishBacklog,
+      promoteStagingTerminal,
       scheduleTerminalWriteFlush,
-      setIsRestoringOutput,
+      stagingTerminalRef,
       terminalRef,
       updateTerminalScrollState,
     ],
@@ -243,10 +447,9 @@ export function useTerminalWriter(
 
   return {
     cancelTerminalWrites,
-    isRestoringOutput,
-    isRestoringOutputRef,
-    queueTerminalWrite,
+    readBacklog,
     resetTerminalOutput,
     restoreTerminalSnapshot,
+    writeLive,
   };
 }

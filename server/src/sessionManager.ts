@@ -4,6 +4,8 @@ import { HttpError } from "./errors.js";
 import {
   TerminalRuntimeController,
   type PtySpawn,
+  type TerminalRuntimeSnapshotOptions,
+  type TerminalRuntimeSnapshot,
 } from "./terminalRuntimeController.js";
 import {
   TerminalInputWriter,
@@ -14,6 +16,7 @@ import type {
   SessionConfig,
   TerminalConfig,
   TerminalOutputEvent,
+  TerminalScreenProgress,
   TerminalSize,
 } from "./types.js";
 import { WindowsConsoleInput } from "./windowsConsoleInput.js";
@@ -28,6 +31,7 @@ type SessionManagerOptions = {
 
 type SessionManagerEvents = {
   output: [TerminalOutputEvent];
+  screenProgress: [TerminalScreenProgress];
   status: [RuntimeStatus];
 };
 
@@ -37,6 +41,7 @@ function stoppedStatus(sessionId: string, terminalId: string): RuntimeStatus {
   return {
     sessionId,
     terminalId,
+    runtimeId: null,
     state: "stopped",
     startedAt: null,
     stoppedAt: null,
@@ -113,6 +118,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
 
     return {
       sessionId: session.id,
+      runtimeId:
+        runningStatuses[0]?.runtimeId ?? newestStatus?.runtimeId ?? null,
       state: runningStatuses.length > 0 ? "running" : "stopped",
       startedAt: latestIso(null, newestStatus?.startedAt ?? null),
       stoppedAt:
@@ -151,6 +158,40 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
 
   getBuffer(sessionId: string, terminalId: string): string {
     return this.controllers.get(sessionId)?.get(terminalId)?.getBuffer() ?? "";
+  }
+
+  async getSnapshot(
+    sessionId: string,
+    terminalId: string,
+    options: TerminalRuntimeSnapshotOptions = {},
+  ): Promise<TerminalRuntimeSnapshot> {
+    const requestedSize = options.requestedSize;
+    const mode = options.mode ?? "tail";
+    const minSeq =
+      typeof options.minSeq === "number" &&
+      Number.isFinite(options.minSeq) &&
+      options.minSeq > 0
+        ? Math.floor(options.minSeq)
+        : null;
+    return (
+      (await this.controllers
+        .get(sessionId)
+        ?.get(terminalId)
+        ?.getSnapshot({ requestedSize, mode, minSeq })) ?? {
+        status: stoppedStatus(sessionId, terminalId),
+        runtimeId: null,
+        format: "xterm-serialized-vt",
+        mode,
+        data: "",
+        seq: 0,
+        minSeq: null,
+        complete: true,
+        cols: requestedSize?.cols ?? 120,
+        rows: requestedSize?.rows ?? 36,
+        screenRevision: 0,
+        bufferType: "normal",
+      }
+    );
   }
 
   async start(
@@ -305,6 +346,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         stopTimeoutMs: this.stopTimeoutMs,
         allocateRuntimeId: () => this.allocateRuntimeId(),
         onOutput: (event) => this.emit("output", event),
+        onScreenProgress: (event) => this.emit("screenProgress", event),
         onStatus: (status) => this.emit("status", status),
       });
       sessionControllers.set(terminalId, controller);

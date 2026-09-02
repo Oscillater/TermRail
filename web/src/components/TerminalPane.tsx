@@ -9,12 +9,19 @@ import type {
   RuntimeStatus,
   SessionConfig,
   StreamConnectionState,
+  TerminalAttention,
   TerminalConfig,
+  TerminalFocusRequest,
   TerminalInputRequest,
+  TerminalSnapshotRequestOptions,
   TerminalSize,
 } from "../types";
 import type { TerminalStream } from "../terminalStream";
-import { formatDate, statusLabel } from "../utils/activity";
+import {
+  formatDate,
+  statusLabel,
+  terminalAttentionLabel,
+} from "../utils/activity";
 import { messageFromError } from "../utils/errors";
 import {
   TerminalEditorForm,
@@ -75,6 +82,7 @@ type TerminalPaneProps = {
   actionTerminalKey: string | null;
   connectionState: StreamConnectionState;
   error: string | null;
+  focusRequest: TerminalFocusRequest | null;
   inputRequest: TerminalInputRequest | null;
   onCreateTerminal: (
     sessionId: string,
@@ -86,6 +94,7 @@ type TerminalPaneProps = {
   ) => Promise<TerminalConfig>;
   onError: (message: string | null) => void;
   onInput: (sessionId: string, terminalId: string, data: string) => boolean;
+  onFocusRequest: (sessionId: string, terminalId: string) => void;
   onResize: (
     sessionId: string,
     terminalId: string,
@@ -94,6 +103,14 @@ type TerminalPaneProps = {
   ) => boolean;
   onSelectTerminal: (sessionId: string, terminalId: string) => void;
   onSize: (size: TerminalSize) => void;
+  onSnapshotRequest: (
+    sessionId: string,
+    terminalId: string,
+    cols: number,
+    rows: number,
+    options?: TerminalSnapshotRequestOptions,
+  ) => boolean;
+  onVisibleOutputApplied: (sessionId: string, terminalId: string) => void;
   onStartTerminal: (sessionId: string, terminalId: string) => void;
   onStopTerminal: (sessionId: string, terminalId: string) => void;
   onUpdateTerminal: (
@@ -104,12 +121,19 @@ type TerminalPaneProps = {
   session: SessionConfig | null;
   status: RuntimeStatus | undefined;
   terminal: TerminalConfig | null;
+  terminalAttention: Record<string, TerminalAttention>;
   terminalStatuses: Record<string, RuntimeStatus>;
   terminalStream: TerminalStream;
 };
 
 function terminalActionKey(sessionId: string, terminalId: string): string {
   return `${sessionId}\u0000${terminalId}`;
+}
+
+function terminalAttentionTone(
+  attention: TerminalAttention | undefined,
+): string {
+  return attention?.state ?? "idle";
 }
 
 function editorTargetsCurrentSelection(
@@ -229,20 +253,25 @@ export function TerminalPane({
   actionTerminalKey,
   connectionState,
   error,
+  focusRequest,
   inputRequest,
   onCreateTerminal,
   onDeleteTerminal,
   onError,
   onInput,
+  onFocusRequest,
   onResize,
   onSelectTerminal,
   onSize,
+  onSnapshotRequest,
+  onVisibleOutputApplied,
   onStartTerminal,
   onStopTerminal,
   onUpdateTerminal,
   session,
   status,
   terminal,
+  terminalAttention,
   terminalStatuses,
   terminalStream,
 }: TerminalPaneProps) {
@@ -289,12 +318,6 @@ export function TerminalPane({
     },
     [focusTerminalCommandInput],
   );
-
-  const focusTerminalSoon = useCallback(() => {
-    window.requestAnimationFrame(() => {
-      viewportRef.current?.focus();
-    });
-  }, []);
 
   useEffect(() => {
     updateEditor((current) =>
@@ -358,8 +381,10 @@ export function TerminalPane({
 
   const closeTerminalForm = useCallback(() => {
     updateEditor({ mode: "view" });
-    focusTerminalSoon();
-  }, [focusTerminalSoon, updateEditor]);
+    if (session && terminal) {
+      onFocusRequest(session.id, terminal.id);
+    }
+  }, [onFocusRequest, session, terminal, updateEditor]);
 
   const updateTerminalDraft = useCallback(
     (draft: TerminalEditorDraft) => {
@@ -398,19 +423,25 @@ export function TerminalPane({
     updateEditor(savingEditor);
 
     try {
+      let focusedTerminalId: string;
       if (savingEditor.submitMode === "create") {
-        await onCreateTerminal(savingEditor.target.sessionId, nextTerminal);
+        const created = await onCreateTerminal(
+          savingEditor.target.sessionId,
+          nextTerminal,
+        );
+        focusedTerminalId = created.id;
       } else {
         await onUpdateTerminal(
           savingEditor.target.sessionId,
           savingEditor.target.terminalId,
           nextTerminal,
         );
+        focusedTerminalId = savingEditor.target.terminalId;
       }
 
       if (sameSavingEditor(editorRef.current, savingEditor)) {
         updateEditor({ mode: "view" });
-        focusTerminalSoon();
+        onFocusRequest(savingEditor.target.sessionId, focusedTerminalId);
       }
     } catch (formError) {
       if (sameSavingEditor(editorRef.current, savingEditor)) {
@@ -430,8 +461,8 @@ export function TerminalPane({
     }
   }, [
     focusTerminalCommandInputSoon,
-    focusTerminalSoon,
     onCreateTerminal,
+    onFocusRequest,
     onUpdateTerminal,
     updateEditor,
   ]);
@@ -479,11 +510,12 @@ export function TerminalPane({
           <button
             className="ghost-button compact"
             disabled={!session || !terminal || running || activeActionBusy}
-            onClick={() =>
-              session && terminal
-                ? onStartTerminal(session.id, terminal.id)
-                : undefined
-            }
+            onClick={() => {
+              if (!session || !terminal) {
+                return;
+              }
+              onStartTerminal(session.id, terminal.id);
+            }}
             type="button"
           >
             Start
@@ -536,16 +568,36 @@ export function TerminalPane({
         {session?.terminals.map((item) => {
           const selected = item.id === terminal?.id;
           const itemStatus = terminalStatuses[item.id];
+          const itemAttention = terminalAttention[item.id];
+          const itemAttentionLabel =
+            itemAttention?.state === "ready" || itemAttention?.state === "done"
+              ? terminalAttentionLabel(itemAttention)
+              : "";
+          const itemAttentionTone = terminalAttentionTone(itemAttention);
           const deleting = deletingTerminalId === item.id;
           return (
             <span
-              className={`terminal-tab${selected ? " selected" : ""}`}
+              className={[
+                "terminal-tab",
+                selected ? "selected" : "",
+                itemAttention?.state === "ready" ? "ready" : "",
+                itemAttention?.state === "done" ? "done" : "",
+                itemAttention?.unread ? "unread-attention" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
               key={item.id}
             >
               <button
                 aria-selected={selected}
                 className="terminal-tab-button"
-                onClick={() => session && onSelectTerminal(session.id, item.id)}
+                onClick={() => {
+                  if (!session) {
+                    return;
+                  }
+                  onSelectTerminal(session.id, item.id);
+                  onFocusRequest(session.id, item.id);
+                }}
                 role="tab"
                 title={item.command}
                 type="button"
@@ -556,6 +608,19 @@ export function TerminalPane({
                   }`}
                 />
                 <span className="terminal-tab-name">{item.name}</span>
+                {itemAttentionLabel ? (
+                  <span
+                    className={[
+                      "terminal-tab-state",
+                      itemAttentionTone,
+                      itemAttention?.unread ? "unread" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                  >
+                    {itemAttentionLabel}
+                  </span>
+                ) : null}
               </button>
               <button
                 aria-label={`Close ${item.name}`}
@@ -596,6 +661,7 @@ export function TerminalPane({
 
       <TerminalViewport
         connectionState={connectionState}
+        focusRequest={focusRequest}
         inputRequest={inputRequest}
         keyboardOwner={keyboardOwner}
         onCreateTerminalClick={openTerminalForm}
@@ -604,6 +670,8 @@ export function TerminalPane({
         onInput={onInput}
         onResize={onResize}
         onSize={onSize}
+        onSnapshotRequest={onSnapshotRequest}
+        onVisibleOutputApplied={onVisibleOutputApplied}
         ref={viewportRef}
         savingTerminal={isSaving}
         sessionId={session?.id ?? null}

@@ -5,6 +5,10 @@ import type {
   PromptExample,
   RuntimeStatus,
   SessionConfig,
+  SessionAttention,
+  SessionAttentionById,
+  TerminalAttention,
+  TerminalAttentionBySession,
 } from "../types";
 
 export const outputQuietDelayMs = 3_000;
@@ -17,6 +21,7 @@ export function defaultRuntimeStatus(
   return {
     sessionId,
     ...(terminalId ? { terminalId } : {}),
+    runtimeId: null,
     state: "stopped",
     startedAt: null,
     stoppedAt: null,
@@ -105,6 +110,7 @@ export function aggregateSessionStatus(
 
   return {
     sessionId: session.id,
+    runtimeId: runningStatuses[0]?.runtimeId ?? newest?.runtimeId ?? null,
     state: runningStatuses.length > 0 ? "running" : "stopped",
     startedAt: newest?.startedAt ?? null,
     stoppedAt: runningStatuses.length > 0 ? null : (newest?.stoppedAt ?? null),
@@ -202,6 +208,154 @@ export function collectOutputActivities(
   return next;
 }
 
+export function terminalAttentionKey(
+  sessionId: string,
+  terminalId: string,
+): string {
+  return `${sessionId}/${terminalId}`;
+}
+
+function timestampOrZero(value: string | null): number {
+  return timestampFromIso(value) ?? 0;
+}
+
+export function terminalAttentionFromStatus(
+  status: RuntimeStatus | undefined,
+  readAt: number,
+  now: number,
+): TerminalAttention {
+  if (!status) {
+    return { state: "idle", unread: false, updatedAt: 0 };
+  }
+
+  const lastOutputAt = timestampOrZero(status.lastOutputAt);
+  const stoppedAt = timestampOrZero(status.stoppedAt);
+  const startedAt = timestampOrZero(status.startedAt);
+
+  if (status.state === "stopped") {
+    const updatedAt = Math.max(stoppedAt, lastOutputAt);
+    if (updatedAt === 0) {
+      return { state: "idle", unread: false, updatedAt: 0 };
+    }
+
+    const unread = updatedAt > readAt;
+    return {
+      state: unread ? "done" : "stopped",
+      unread,
+      updatedAt,
+    };
+  }
+
+  if (lastOutputAt === 0) {
+    return {
+      state: "running",
+      unread: false,
+      updatedAt: startedAt,
+    };
+  }
+
+  const ready = now - lastOutputAt >= outputQuietDelayMs;
+  return {
+    state: ready ? "ready" : "working",
+    unread: ready && lastOutputAt > readAt,
+    updatedAt: lastOutputAt,
+  };
+}
+
+export function collectTerminalAttention(
+  sessions: SessionConfig[],
+  terminalStatuses: Record<string, Record<string, RuntimeStatus>>,
+  terminalReadAt: Record<string, number>,
+  now: number,
+): TerminalAttentionBySession {
+  return Object.fromEntries(
+    sessions.map((session) => [
+      session.id,
+      Object.fromEntries(
+        session.terminals.map((terminal) => {
+          const status =
+            terminalStatuses[session.id]?.[terminal.id] ??
+            defaultRuntimeStatus(session.id, terminal.id);
+          const readAt =
+            terminalReadAt[terminalAttentionKey(session.id, terminal.id)] ?? 0;
+
+          return [
+            terminal.id,
+            terminalAttentionFromStatus(status, readAt, now),
+          ];
+        }),
+      ),
+    ]),
+  );
+}
+
+export function summarizeSessionAttention(
+  session: SessionConfig,
+  terminalAttention: Record<string, TerminalAttention> | undefined,
+): SessionAttention {
+  return session.terminals.reduce<SessionAttention>(
+    (summary, terminal) => {
+      const attention = terminalAttention?.[terminal.id] ?? {
+        state: "idle" as const,
+        unread: false,
+        updatedAt: 0,
+      };
+
+      summary.updatedAt = Math.max(summary.updatedAt, attention.updatedAt);
+      if (attention.unread) {
+        summary.unreadCount += 1;
+      }
+
+      switch (attention.state) {
+        case "done":
+          summary.unreadDoneCount += attention.unread ? 1 : 0;
+          summary.stoppedCount += 1;
+          break;
+        case "ready":
+          summary.readyCount += 1;
+          summary.unreadReadyCount += attention.unread ? 1 : 0;
+          break;
+        case "working":
+          summary.workingCount += 1;
+          break;
+        case "running":
+          summary.runningCount += 1;
+          break;
+        case "stopped":
+          summary.stoppedCount += 1;
+          break;
+        case "idle":
+          break;
+      }
+
+      return summary;
+    },
+    {
+      terminalCount: session.terminals.length,
+      unreadCount: 0,
+      unreadReadyCount: 0,
+      unreadDoneCount: 0,
+      readyCount: 0,
+      workingCount: 0,
+      runningCount: 0,
+      stoppedCount: 0,
+      updatedAt: 0,
+    },
+  );
+}
+
+export function collectSessionAttention(
+  sessions: SessionConfig[],
+  terminalAttention: TerminalAttentionBySession,
+): SessionAttentionById {
+  return Object.fromEntries(
+    sessions.map((session) => [
+      session.id,
+      summarizeSessionAttention(session, terminalAttention[session.id]),
+    ]),
+  );
+}
+
 export function statusLabel(status: RuntimeStatus | undefined): string {
   return status?.state === "running" ? "Running" : "Stopped";
 }
@@ -243,4 +397,103 @@ export function activitySortValue(state: OutputActivityState): number {
     case "running":
       return 3;
   }
+}
+
+export function terminalAttentionLabel(
+  attention: TerminalAttention | undefined,
+): string {
+  switch (attention?.state) {
+    case "done":
+      return "Done";
+    case "ready":
+      return "Ready";
+    case "working":
+      return "Working";
+    case "running":
+      return "Running";
+    case "stopped":
+      return "Stopped";
+    case "idle":
+    case undefined:
+      return "";
+  }
+}
+
+function plural(value: number, singular: string): string {
+  return `${value} ${singular}${value === 1 ? "" : "s"}`;
+}
+
+export function sessionAttentionLabel(
+  attention: SessionAttention | undefined,
+): string {
+  if (!attention || attention.terminalCount === 0) {
+    return "";
+  }
+  if (attention.unreadReadyCount > 0 && attention.unreadDoneCount > 0) {
+    return `${attention.unreadCount} Ready`;
+  }
+  if (attention.unreadReadyCount > 0) {
+    return `${attention.unreadReadyCount} Ready`;
+  }
+  if (attention.unreadDoneCount > 0) {
+    return `${attention.unreadDoneCount} Done`;
+  }
+  if (attention.readyCount > 0) {
+    return "Ready";
+  }
+  if (attention.workingCount > 0) {
+    return "Working";
+  }
+  if (attention.runningCount > 0) {
+    return "Running";
+  }
+  return "";
+}
+
+export function sessionAttentionDetail(
+  attention: SessionAttention | undefined,
+): string {
+  if (!attention || attention.terminalCount === 0) {
+    return "No terminal tabs";
+  }
+  if (attention.unreadReadyCount > 0 && attention.unreadDoneCount > 0) {
+    return `${plural(attention.unreadCount, "terminal")} need review`;
+  }
+  if (attention.unreadReadyCount > 0) {
+    return `${plural(attention.unreadReadyCount, "terminal")} ready`;
+  }
+  if (attention.unreadDoneCount > 0) {
+    return `${plural(attention.unreadDoneCount, "terminal")} done`;
+  }
+  if (attention.readyCount > 0) {
+    return `${plural(attention.readyCount, "terminal")} ready`;
+  }
+  if (attention.workingCount > 0) {
+    return "Output is streaming";
+  }
+  if (attention.runningCount > 0) {
+    return "Process running";
+  }
+  return "No unread output";
+}
+
+export function sessionAttentionSortValue(
+  attention: SessionAttention | undefined,
+): number {
+  if (!attention) {
+    return 5;
+  }
+  if (attention.unreadCount > 0) {
+    return 0;
+  }
+  if (attention.readyCount > 0) {
+    return 1;
+  }
+  if (attention.workingCount > 0) {
+    return 2;
+  }
+  if (attention.runningCount > 0) {
+    return 3;
+  }
+  return 4;
 }

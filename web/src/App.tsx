@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PromptPanel } from "./components/PromptPanel";
 import { SessionPanel } from "./components/SessionPanel";
 import { TerminalPane } from "./components/TerminalPane";
 import { useAppController } from "./useAppController";
+import type { TerminalFocusRequest } from "./types";
 
 type PanelCollapseState = {
   prompts: boolean;
@@ -51,6 +52,9 @@ export function App() {
   const [collapsedPanels, setCollapsedPanels] = useState(
     readPanelCollapseState,
   );
+  const terminalFocusRequestCounterRef = useRef(0);
+  const [terminalFocusRequest, setTerminalFocusRequest] =
+    useState<TerminalFocusRequest | null>(null);
   const appShellClassName = [
     "app-shell",
     collapsedPanels.sessions ? "sessions-collapsed" : "",
@@ -62,6 +66,33 @@ export function App() {
   useEffect(() => {
     writePanelCollapseState(collapsedPanels);
   }, [collapsedPanels]);
+
+  const requestTerminalFocus = (sessionId: string, terminalId: string) => {
+    terminalFocusRequestCounterRef.current += 1;
+    setTerminalFocusRequest({
+      id: terminalFocusRequestCounterRef.current,
+      sessionId,
+      terminalId,
+    });
+  };
+
+  const selectSessionAndFocus = (sessionId: string) => {
+    app.selectSession(sessionId);
+    const session = app.sessions.find((item) => item.id === sessionId);
+    const terminalId =
+      app.activeTerminalIds[sessionId] ?? session?.terminals[0]?.id ?? null;
+    if (terminalId) {
+      requestTerminalFocus(sessionId, terminalId);
+    }
+  };
+
+  const startTerminalAndFocus = (sessionId: string, terminalId: string) => {
+    app.selectTerminal(sessionId, terminalId);
+    requestTerminalFocus(sessionId, terminalId);
+    void app
+      .runTerminalAction(sessionId, terminalId, "start")
+      .finally(() => requestTerminalFocus(sessionId, terminalId));
+  };
 
   return (
     <main className={appShellClassName}>
@@ -75,10 +106,8 @@ export function App() {
         onDeleteSession={app.deleteSession}
         onEditSession={app.updateSession}
         onRefresh={app.loadSessions}
-        onSelect={app.selectSession}
-        onStart={(sessionId, terminalId) =>
-          void app.runTerminalAction(sessionId, terminalId, "start")
-        }
+        onSelect={selectSessionAndFocus}
+        onStart={startTerminalAndFocus}
         onStop={(sessionId, terminalId) =>
           void app.runTerminalAction(sessionId, terminalId, "stop")
         }
@@ -88,27 +117,28 @@ export function App() {
             sessions: !current.sessions,
           }))
         }
-        outputActivities={app.outputActivities}
+        sessionAttention={app.sessionAttention}
         selectedSessionId={app.selectedSessionId}
         sessions={app.sessions}
-        statuses={app.statuses}
         terminalStatuses={app.terminalStatuses}
       />
       <TerminalPane
         actionTerminalKey={app.actionTerminalKey}
         connectionState={app.streamConnectionState}
         error={app.terminalError}
+        focusRequest={terminalFocusRequest}
         inputRequest={app.terminalInputRequest}
         onCreateTerminal={app.createTerminal}
         onDeleteTerminal={app.deleteTerminal}
         onError={app.setTerminalError}
         onInput={app.sendTerminalInput}
+        onFocusRequest={requestTerminalFocus}
         onResize={app.sendTerminalResize}
         onSelectTerminal={app.selectTerminal}
         onSize={app.setTerminalSize}
-        onStartTerminal={(sessionId, terminalId) =>
-          void app.runTerminalAction(sessionId, terminalId, "start")
-        }
+        onSnapshotRequest={app.requestTerminalSnapshot}
+        onVisibleOutputApplied={app.markVisibleTerminalOutputApplied}
+        onStartTerminal={startTerminalAndFocus}
         onStopTerminal={(sessionId, terminalId) =>
           void app.runTerminalAction(sessionId, terminalId, "stop")
         }
@@ -116,6 +146,7 @@ export function App() {
         session={app.selectedSession}
         status={app.selectedTerminalStatus}
         terminal={app.selectedTerminal}
+        terminalAttention={app.selectedTerminalAttention}
         terminalStatuses={app.selectedTerminalStatuses}
         terminalStream={app.terminalStream}
       />

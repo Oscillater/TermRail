@@ -548,32 +548,351 @@ async function testOutputSeqAndBufferSemantics(SessionManager) {
   await manager.start(session, terminalConfig);
   factory.terminals[0].emitData("first");
   assert.equal(manager.getBuffer(session.id, terminalConfig.id), "first");
+  assert.deepEqual(await manager.getSnapshot(session.id, terminalConfig.id), {
+    status: manager.getStatus(session.id, terminalConfig.id),
+    runtimeId: 1,
+    format: "xterm-serialized-vt",
+    mode: "tail",
+    data: "first",
+    seq: 1,
+    minSeq: 1,
+    complete: true,
+    cols: 120,
+    rows: 36,
+    screenRevision: 1,
+    bufferType: "normal",
+  });
   factory.terminals[0].emitExit(0);
 
   await manager.start(session, terminalConfig);
   assert.equal(manager.getBuffer(session.id, terminalConfig.id), "");
   factory.terminals[1].emitData("second");
   assert.equal(manager.getBuffer(session.id, terminalConfig.id), "second");
+  assert.equal(
+    (await manager.getSnapshot(session.id, terminalConfig.id)).seq,
+    1,
+  );
   factory.terminals[1].emitExit(0);
 
   await manager.deleteTerminalRuntime(session.id, terminalConfig.id);
   await manager.start(session, terminalConfig);
   assert.equal(manager.getBuffer(session.id, terminalConfig.id), "");
   factory.terminals[2].emitData("third");
+  assert.equal(
+    (await manager.getSnapshot(session.id, terminalConfig.id)).seq,
+    1,
+  );
 
   assert.deepEqual(
     output.map((event) => ({
       data: event.data,
+      runtimeId: event.runtimeId,
       seq: event.seq,
     })),
     [
-      { data: "first", seq: 1 },
-      { data: "second", seq: 2 },
-      { data: "third", seq: 1 },
+      { data: "first", runtimeId: 1, seq: 1 },
+      { data: "second", runtimeId: 2, seq: 1 },
+      { data: "third", runtimeId: 3, seq: 1 },
     ],
   );
 
   factory.terminals[2].emitExit(0);
+}
+
+async function testSnapshotDoesNotResizePty(SessionManager) {
+  const factory = createPtyFactory();
+  const manager = new SessionManager(process.cwd(), {
+    ptySpawn: factory.spawn,
+  });
+  const session = sessionConfig();
+  const terminalConfig = session.terminals[0];
+
+  await manager.start(session, terminalConfig);
+  const snapshot = await manager.getSnapshot(session.id, terminalConfig.id, {
+    requestedSize: {
+      cols: 88,
+      rows: 24,
+    },
+  });
+
+  assert.deepEqual(factory.terminals[0].resizes, []);
+  assert.equal(snapshot.cols, 120);
+  assert.equal(snapshot.rows, 36);
+
+  factory.terminals[0].emitExit(0);
+}
+
+async function testTerminalEnvironmentSupportsColor(SessionManager) {
+  const factory = createPtyFactory();
+  const manager = new SessionManager(process.cwd(), {
+    ptySpawn: factory.spawn,
+  });
+  const session = sessionConfig();
+  const terminalConfig = session.terminals[0];
+
+  await manager.start(session, terminalConfig);
+  const env = factory.terminals[0].options.env;
+  assert.equal(env.TERM, "xterm-256color");
+  assert.equal(env.COLORTERM, "truecolor");
+  assert.equal(env.TERM_PROGRAM, "TermRail");
+  assert.equal(env.NO_COLOR, undefined);
+  assert.notEqual(env, process.env);
+
+  factory.terminals[0].emitExit(0);
+}
+
+async function testStoppedSnapshotIsComplete(SessionManager) {
+  const factory = createPtyFactory();
+  const manager = new SessionManager(process.cwd(), {
+    ptySpawn: factory.spawn,
+  });
+  const session = sessionConfig();
+  const terminalConfig = session.terminals[0];
+
+  const uninitializedSnapshot = await manager.getSnapshot(
+    session.id,
+    terminalConfig.id,
+    {
+      requestedSize: { cols: 90, rows: 25 },
+      minSeq: 42,
+    },
+  );
+  assert.equal(uninitializedSnapshot.runtimeId, null);
+  assert.equal(uninitializedSnapshot.seq, 0);
+  assert.equal(uninitializedSnapshot.minSeq, null);
+  assert.equal(uninitializedSnapshot.complete, true);
+  assert.equal(uninitializedSnapshot.cols, 90);
+  assert.equal(uninitializedSnapshot.rows, 25);
+
+  manager.resize(session.id, terminalConfig.id, 88, 24);
+  const resizedStoppedSnapshot = await manager.getSnapshot(
+    session.id,
+    terminalConfig.id,
+    { minSeq: 42 },
+  );
+  assert.equal(resizedStoppedSnapshot.runtimeId, null);
+  assert.equal(resizedStoppedSnapshot.seq, 0);
+  assert.equal(resizedStoppedSnapshot.minSeq, null);
+  assert.equal(resizedStoppedSnapshot.complete, true);
+  assert.equal(resizedStoppedSnapshot.cols, 88);
+  assert.equal(resizedStoppedSnapshot.rows, 24);
+  assert.deepEqual(factory.terminals, []);
+}
+
+async function testResizeUpdatesSnapshotSize(SessionManager) {
+  const factory = createPtyFactory();
+  const manager = new SessionManager(process.cwd(), {
+    ptySpawn: factory.spawn,
+  });
+  const session = sessionConfig();
+  const terminalConfig = session.terminals[0];
+
+  await manager.start(session, terminalConfig);
+  manager.resize(session.id, terminalConfig.id, 88, 24);
+  const snapshot = await manager.getSnapshot(session.id, terminalConfig.id);
+
+  assert.deepEqual(factory.terminals[0].resizes, [{ cols: 88, rows: 24 }]);
+  assert.equal(snapshot.cols, 88);
+  assert.equal(snapshot.rows, 24);
+
+  factory.terminals[0].emitExit(0);
+}
+
+async function testSnapshotModes(SessionManager) {
+  const factory = createPtyFactory();
+  const manager = new SessionManager(process.cwd(), {
+    ptySpawn: factory.spawn,
+  });
+  const session = sessionConfig();
+  const terminalConfig = session.terminals[0];
+  const lines = Array.from(
+    { length: 80 },
+    (_, index) => `line-${String(index).padStart(3, "0")}`,
+  );
+
+  await manager.start(session, terminalConfig, { cols: 80, rows: 10 });
+  factory.terminals[0].emitData(`${lines.join("\r\n")}\r\n`);
+
+  const tailSnapshot = await manager.getSnapshot(
+    session.id,
+    terminalConfig.id,
+    {
+      mode: "tail",
+      minSeq: 1,
+    },
+  );
+  assert.equal(tailSnapshot.mode, "tail");
+  assert.equal(tailSnapshot.minSeq, 1);
+  assert.equal(tailSnapshot.complete, true);
+  assert.ok(tailSnapshot.data.includes("line-079"));
+  assert.equal(tailSnapshot.data.includes("line-000"), false);
+
+  const fullSnapshot = await manager.getSnapshot(
+    session.id,
+    terminalConfig.id,
+    {
+      mode: "full",
+      minSeq: 1,
+    },
+  );
+  assert.equal(fullSnapshot.mode, "full");
+  assert.equal(fullSnapshot.minSeq, 1);
+  assert.equal(fullSnapshot.complete, true);
+  assert.ok(fullSnapshot.data.includes("line-079"));
+  assert.ok(fullSnapshot.data.includes("line-000"));
+
+  factory.terminals[0].emitExit(0);
+}
+
+async function testTinyOutputChunksSnapshotQuickly(SessionManager) {
+  const factory = createPtyFactory();
+  const manager = new SessionManager(process.cwd(), {
+    ptySpawn: factory.spawn,
+  });
+  const session = sessionConfig();
+  const terminalConfig = session.terminals[0];
+  const chunkCount = 3000;
+
+  await manager.start(session, terminalConfig);
+  for (let index = 0; index < chunkCount; index += 1) {
+    factory.terminals[0].emitData(`line-${index}\r\n`);
+  }
+
+  const startedAt = Date.now();
+  const snapshot = await manager.getSnapshot(session.id, terminalConfig.id);
+
+  assert.ok(Date.now() - startedAt < 1000);
+  assert.equal(snapshot.seq, chunkCount);
+  assert.equal(snapshot.mode, "tail");
+  assert.equal(snapshot.complete, true);
+  assert.ok(snapshot.data.includes(`line-${chunkCount - 1}`));
+
+  factory.terminals[0].emitExit(0);
+}
+
+async function testSnapshotCompletesWhileOutputContinues(SessionManager) {
+  const factory = createPtyFactory();
+  const manager = new SessionManager(process.cwd(), {
+    ptySpawn: factory.spawn,
+  });
+  const session = sessionConfig();
+  const terminalConfig = session.terminals[0];
+  let emitted = 0;
+
+  await manager.start(session, terminalConfig, { cols: 60, rows: 12 });
+  const emitBatch = () => {
+    for (let index = 0; index < 64; index += 1) {
+      emitted += 1;
+      factory.terminals[0].emitData(`stream-${emitted}\r\n`);
+    }
+  };
+  emitBatch();
+  const minSeq = emitted;
+  const outputTimer = setInterval(emitBatch, 1);
+
+  let snapshot;
+  try {
+    snapshot = await manager.getSnapshot(session.id, terminalConfig.id, {
+      mode: "full",
+      minSeq,
+    });
+  } finally {
+    clearInterval(outputTimer);
+  }
+
+  assert.ok(emitted > minSeq);
+  assert.equal(snapshot.complete, true);
+  assert.ok(snapshot.seq >= minSeq);
+  assert.ok(snapshot.data.includes("stream-"));
+
+  factory.terminals[0].emitExit(0);
+}
+
+async function testScreenProgressTracksRenderedWork(SessionManager) {
+  const factory = createPtyFactory();
+  const manager = new SessionManager(process.cwd(), {
+    ptySpawn: factory.spawn,
+  });
+  const session = sessionConfig();
+  const terminalConfig = session.terminals[0];
+  const progress = [];
+  manager.on("screenProgress", (event) => progress.push(event));
+
+  await manager.start(session, terminalConfig, { cols: 40, rows: 4 });
+  factory.terminals[0].emitData(
+    Array.from({ length: 12 }, (_, index) => `line-${index}`).join("\r\n"),
+  );
+  await waitFor(() => progress.length === 1, "normal screen progress");
+
+  assert.equal(progress[0].runtimeId, 1);
+  assert.equal(progress[0].seq, 1);
+  assert.equal(progress[0].bufferType, "normal");
+  assert.equal(progress[0].rows, 4);
+  assert.ok(progress[0].screenRevision >= 4);
+
+  const revisionBeforeResize = progress[0].screenRevision;
+  manager.resize(session.id, terminalConfig.id, 50, 6);
+  const resizedSnapshot = await manager.getSnapshot(
+    session.id,
+    terminalConfig.id,
+  );
+  assert.equal(resizedSnapshot.screenRevision, revisionBeforeResize);
+  assert.equal(resizedSnapshot.cols, 50);
+  assert.equal(resizedSnapshot.rows, 6);
+
+  factory.terminals[0].emitExit(0);
+}
+
+async function testAlternateBufferScreenProgress(SessionManager) {
+  const factory = createPtyFactory();
+  const manager = new SessionManager(process.cwd(), {
+    ptySpawn: factory.spawn,
+  });
+  const session = sessionConfig();
+  const terminalConfig = session.terminals[0];
+  const progress = [];
+  manager.on("screenProgress", (event) => progress.push(event));
+
+  await manager.start(session, terminalConfig, { cols: 40, rows: 6 });
+  factory.terminals[0].emitData("\x1b[?1049h\x1b[2J\x1b[HSelect a session");
+  await waitFor(() => progress.length === 1, "alternate screen progress");
+
+  assert.equal(progress[0].bufferType, "alternate");
+  assert.ok(progress[0].screenRevision > 0);
+  const snapshot = await manager.getSnapshot(session.id, terminalConfig.id);
+  assert.equal(snapshot.bufferType, "alternate");
+  assert.equal(snapshot.screenRevision, progress[0].screenRevision);
+
+  factory.terminals[0].emitExit(0);
+}
+
+async function testScreenProgressResetsWithRuntime(SessionManager) {
+  const factory = createPtyFactory();
+  const manager = new SessionManager(process.cwd(), {
+    ptySpawn: factory.spawn,
+  });
+  const session = sessionConfig();
+  const terminalConfig = session.terminals[0];
+  const progress = [];
+  manager.on("screenProgress", (event) => progress.push(event));
+
+  await manager.start(session, terminalConfig, { cols: 40, rows: 4 });
+  factory.terminals[0].emitData(
+    Array.from({ length: 20 }, (_, index) => `old-${index}`).join("\r\n"),
+  );
+  await waitFor(() => progress.length === 1, "first runtime progress");
+  const firstRevision = progress[0].screenRevision;
+  factory.terminals[0].emitExit(0);
+
+  await manager.start(session, terminalConfig, { cols: 40, rows: 4 });
+  factory.terminals[1].emitData("new");
+  await waitFor(() => progress.length === 2, "second runtime progress");
+
+  assert.equal(progress[1].runtimeId, 2);
+  assert.equal(progress[1].seq, 1);
+  assert.ok(progress[1].screenRevision < firstRevision);
+
+  factory.terminals[1].emitExit(0);
 }
 
 async function testWindowsInputFallback(
@@ -680,6 +999,16 @@ async function main() {
     WindowsConsoleInputError,
   );
   await testOutputSeqAndBufferSemantics(SessionManager);
+  await testSnapshotDoesNotResizePty(SessionManager);
+  await testTerminalEnvironmentSupportsColor(SessionManager);
+  await testStoppedSnapshotIsComplete(SessionManager);
+  await testResizeUpdatesSnapshotSize(SessionManager);
+  await testSnapshotModes(SessionManager);
+  await testTinyOutputChunksSnapshotQuickly(SessionManager);
+  await testSnapshotCompletesWhileOutputContinues(SessionManager);
+  await testScreenProgressTracksRenderedWork(SessionManager);
+  await testAlternateBufferScreenProgress(SessionManager);
+  await testScreenProgressResetsWithRuntime(SessionManager);
   await testWindowsInputFallback(SessionManager, WindowsConsoleInputError);
   await testUnsupportedWindowsInputUsesPty(SessionManager);
 

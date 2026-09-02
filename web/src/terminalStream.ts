@@ -1,28 +1,56 @@
-import type { TerminalTarget } from "./types";
+import type {
+  TerminalBufferType,
+  TerminalSnapshotMode,
+  TerminalTarget,
+} from "./types";
 
 export type TerminalStreamSnapshotEvent = {
   type: "snapshot";
   sessionId: string;
   terminalId: string;
-  buffer: string;
+  runtimeId: number | null;
+  format: "xterm-serialized-vt";
+  mode: TerminalSnapshotMode;
+  data: string;
+  seq: number;
+  minSeq: number | null;
+  complete: boolean;
+  cols: number;
+  rows: number;
+  screenRevision: number;
+  bufferType: TerminalBufferType;
 };
 
 export type TerminalStreamOutputEvent = {
   type: "output";
   sessionId: string;
   terminalId: string;
+  runtimeId: number;
   data: string;
   at: string;
   seq: number;
 };
 
+export type TerminalStreamProgressEvent = {
+  type: "progress";
+  sessionId: string;
+  terminalId: string;
+  runtimeId: number;
+  seq: number;
+  screenRevision: number;
+  bufferType: TerminalBufferType;
+  cols: number;
+  rows: number;
+};
+
 export type TerminalStreamEvent =
-  TerminalStreamSnapshotEvent | TerminalStreamOutputEvent;
+  | TerminalStreamSnapshotEvent
+  | TerminalStreamOutputEvent
+  | TerminalStreamProgressEvent;
 
 export type TerminalStreamSink = (event: TerminalStreamEvent) => void;
 
 export type TerminalStream = {
-  clearSnapshot: (target: TerminalTarget) => void;
   publish: (event: TerminalStreamEvent) => void;
   subscribe: (target: TerminalTarget, sink: TerminalStreamSink) => () => void;
 };
@@ -32,20 +60,11 @@ function targetKey(target: TerminalTarget): string {
 }
 
 export function createTerminalStream(): TerminalStream {
-  const snapshots = new Map<string, TerminalStreamSnapshotEvent>();
   const subscribers = new Map<string, Set<TerminalStreamSink>>();
 
   return {
-    clearSnapshot(target) {
-      snapshots.delete(targetKey(target));
-    },
-
     publish(event) {
       const key = targetKey(event);
-      if (event.type === "snapshot") {
-        snapshots.set(key, event);
-      }
-
       const sinks = subscribers.get(key);
       if (!sinks) {
         return;
@@ -62,11 +81,6 @@ export function createTerminalStream(): TerminalStream {
         subscribers.set(key, sinks);
       }
       sinks.add(sink);
-
-      const snapshot = snapshots.get(key);
-      if (snapshot) {
-        sink(snapshot);
-      }
 
       return () => {
         sinks?.delete(sink);

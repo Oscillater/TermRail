@@ -1,14 +1,14 @@
 import { useState } from "react";
 import type {
-  OutputActivities,
-  OutputActivity,
   RuntimeStatus,
+  SessionAttention,
+  SessionAttentionById,
   SessionConfig,
 } from "../types";
 import {
-  activitySortValue,
-  outputActivityDetail,
-  outputActivityLabel,
+  sessionAttentionDetail,
+  sessionAttentionLabel,
+  sessionAttentionSortValue,
   statusLabel,
 } from "../utils/activity";
 import { messageFromError } from "../utils/errors";
@@ -39,15 +39,33 @@ type SessionPanelProps = {
   onStart: (sessionId: string, terminalId: string) => void;
   onStop: (sessionId: string, terminalId: string) => void;
   onToggleCollapsed: () => void;
-  outputActivities: OutputActivities;
+  sessionAttention: SessionAttentionById;
   selectedSessionId: string | null;
   sessions: SessionConfig[];
-  statuses: Record<string, RuntimeStatus>;
   terminalStatuses: Record<string, Record<string, RuntimeStatus>>;
 };
 
 function terminalActionKey(sessionId: string, terminalId: string): string {
   return `${sessionId}\u0000${terminalId}`;
+}
+
+function sessionAttentionTone(attention: SessionAttention | undefined): string {
+  if (!attention || attention.terminalCount === 0) {
+    return "empty";
+  }
+  if (attention.unreadCount > 0) {
+    return "unread";
+  }
+  if (attention.readyCount > 0) {
+    return "ready";
+  }
+  if (attention.workingCount > 0) {
+    return "working";
+  }
+  if (attention.runningCount > 0) {
+    return "running";
+  }
+  return "stopped";
 }
 
 export function SessionPanel({
@@ -64,10 +82,9 @@ export function SessionPanel({
   onStart,
   onStop,
   onToggleCollapsed,
-  outputActivities,
+  sessionAttention,
   selectedSessionId,
   sessions,
-  statuses,
   terminalStatuses,
 }: SessionPanelProps) {
   const [editor, setEditor] = useState<SessionEditorState | null>(null);
@@ -79,46 +96,42 @@ export function SessionPanel({
   );
   const visibleActivityItems = sessions
     .map((session, index) => {
-      const outputActivity = outputActivities[session.id];
-      const status = statuses[session.id];
-      const activity =
-        outputActivity ??
-        (status?.state === "running"
-          ? {
-              state: "running" as const,
-              updatedAt: 0,
-            }
-          : undefined);
-
-      return { activity, index, session };
+      const attention = sessionAttention[session.id];
+      const label = sessionAttentionLabel(attention);
+      return { attention, index, label, session };
     })
     .filter(
       (
         item,
       ): item is {
-        activity: OutputActivity;
+        attention: SessionAttention;
         index: number;
+        label: string;
         session: SessionConfig;
-      } => Boolean(item.activity),
+      } => Boolean(item.attention && item.label),
     );
-  const quietActivityCount = visibleActivityItems.filter(
-    (item) =>
-      item.activity.state === "quiet" || item.activity.state === "stopped",
-  ).length;
+  const unreadActivityCount = visibleActivityItems.reduce(
+    (total, item) => total + item.attention.unreadCount,
+    0,
+  );
   const activeActivityCount = visibleActivityItems.filter(
     (item) =>
-      item.activity.state === "working" || item.activity.state === "running",
+      item.attention.readyCount > 0 ||
+      item.attention.workingCount > 0 ||
+      item.attention.runningCount > 0,
   ).length;
   const activitySummary =
-    quietActivityCount > 0
-      ? `${quietActivityCount} ready`
+    unreadActivityCount > 0
+      ? `${unreadActivityCount} unread`
       : activeActivityCount > 0
         ? `${activeActivityCount} active`
         : "Idle";
   const sortedActivityItems = [...visibleActivityItems].sort(
     (left, right) =>
-      activitySortValue(left.activity.state) -
-        activitySortValue(right.activity.state) || left.index - right.index,
+      sessionAttentionSortValue(left.attention) -
+        sessionAttentionSortValue(right.attention) ||
+      right.attention.updatedAt - left.attention.updatedAt ||
+      left.index - right.index,
   );
 
   const openCreateEditor = () => {
@@ -258,27 +271,28 @@ export function SessionPanel({
         </div>
         {sortedActivityItems.length > 0 ? (
           <div className="activity-list">
-            {sortedActivityItems.map(({ activity, session }) => (
-              <button
-                className={`activity-item ${activity.state}`}
-                key={session.id}
-                onClick={() => onSelect(session.id)}
-                type="button"
-              >
-                <span className="activity-item-main">
-                  <span className="activity-item-name">{session.name}</span>
-                  <span className="activity-item-detail">
-                    {outputActivityDetail(activity)}
+            {sortedActivityItems.map(({ attention, label, session }) => {
+              const tone = sessionAttentionTone(attention);
+              return (
+                <button
+                  className={`activity-item ${tone}`}
+                  key={session.id}
+                  onClick={() => onSelect(session.id)}
+                  type="button"
+                >
+                  <span className="activity-item-main">
+                    <span className="activity-item-name">{session.name}</span>
+                    <span className="activity-item-detail">
+                      {sessionAttentionDetail(attention)}
+                    </span>
                   </span>
-                </span>
-                <span className={`activity-state ${activity.state}`}>
-                  {outputActivityLabel(activity.state)}
-                </span>
-              </button>
-            ))}
+                  <span className={`activity-state ${tone}`}>{label}</span>
+                </button>
+              );
+            })}
           </div>
         ) : (
-          <p className="activity-empty">No paused output.</p>
+          <p className="activity-empty">No unread output.</p>
         )}
       </div>
 
@@ -316,11 +330,20 @@ export function SessionPanel({
             ? actionTerminalKey === terminalActionKey(session.id, terminalId)
             : false;
           const isDeleting = deletingSessionId === session.id;
-          const activity = outputActivities[session.id];
+          const attention = sessionAttention[session.id];
+          const attentionLabel = sessionAttentionLabel(attention);
+          const attentionTone = sessionAttentionTone(attention);
+          const hasUnreadAttention = Boolean(attention?.unreadCount);
 
           return (
             <section
-              className={`session-item${isSelected ? " selected" : ""}`}
+              className={[
+                "session-item",
+                isSelected ? "selected" : "",
+                hasUnreadAttention ? "unread-attention" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
               key={session.id}
             >
               <button
@@ -334,19 +357,23 @@ export function SessionPanel({
                       {session.name}
                     </span>
                     <span
-                      aria-hidden={activity ? undefined : true}
+                      aria-hidden={attentionLabel ? undefined : true}
                       aria-label={
-                        activity
-                          ? `${outputActivityLabel(
-                              activity.state,
-                            )}: ${outputActivityDetail(activity)}`
+                        attentionLabel
+                          ? `${attentionLabel}: ${sessionAttentionDetail(
+                              attention,
+                            )}`
                           : undefined
                       }
-                      className={`activity-badge ${activity?.state ?? "empty"}`}
+                      className={[
+                        "activity-badge",
+                        attentionLabel ? attentionTone : "empty",
+                        hasUnreadAttention ? "unread" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
                     >
-                      {activity
-                        ? outputActivityLabel(activity.state)
-                        : "Working"}
+                      {attentionLabel || "Ready"}
                     </span>
                   </span>
                   <span className={`status-pill ${isRunning ? "run" : "stop"}`}>

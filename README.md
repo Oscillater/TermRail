@@ -183,8 +183,18 @@ Client messages:
 {
   "type": "subscribe",
   "sessionId": "my-project-codex",
+  "terminalId": "codex"
+}
+```
+
+```json
+{
+  "type": "snapshot",
+  "sessionId": "my-project-codex",
   "terminalId": "codex",
-  "includeBuffer": true
+  "requestId": "snapshot-1",
+  "cols": 120,
+  "rows": 32
 }
 ```
 
@@ -207,7 +217,7 @@ Client messages:
 }
 ```
 
-Server messages include `subscribed`, `unsubscribed`, `terminal.output`, `terminal.status`, `session.status`, and `error`.
+Server messages include `subscribed`, `terminal.snapshot`, `unsubscribed`, `terminal.output`, `terminal.status`, `session.status`, and `error`. Terminal snapshots return serialized xterm state in `data` with `runtimeId`, `seq`, `cols`, `rows`, and `format`.
 
 ## Development
 
