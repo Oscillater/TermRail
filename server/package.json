@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "lint": "npm run check",
-    "test": "npm run build && node scripts/config-model.test.cjs && node scripts/pty-backend.test.cjs && node scripts/windows-console-input.test.cjs && node scripts/session-operation-queue.test.cjs && node scripts/session-manager.test.cjs",
+    "test": "npm run build && node scripts/config-model.test.cjs && node scripts/pty-backend.test.cjs && node scripts/windows-console-input.test.cjs && node scripts/session-operation-queue.test.cjs && node scripts/session-manager.test.cjs && node scripts/ws.test.cjs",
     "smoke": "npm run build && node scripts/smoke.cjs",
     "start": "node dist/index.js"
   },

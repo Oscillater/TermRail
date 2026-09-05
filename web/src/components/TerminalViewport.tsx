@@ -66,7 +66,7 @@ type TerminalViewportProps = {
     cols: number,
     rows: number,
     options?: TerminalSnapshotRequestOptions,
-  ) => boolean;
+  ) => string | null;
   onVisibleOutputApplied: (sessionId: string, terminalId: string) => void;
   savingTerminal: boolean;
   sessionId: string | null;
@@ -151,7 +151,10 @@ export const TerminalViewport = forwardRef<
   const residualDroppedRef = useRef(false);
   const residualCaptureEnabledRef = useRef(false);
   const snapshotPurposeRef = useRef<SnapshotPurpose | null>(null);
+  const snapshotRequestIdRef = useRef<string | null>(null);
+  const snapshotRequestGenerationRef = useRef(0);
   const snapshotTargetSeqRef = useRef(0);
+  const targetGenerationRef = useRef(0);
   const catchUpReleaseSeqRef = useRef(0);
   const catchUpReleaseRuntimeIdRef = useRef<number | null>(null);
   const writerBacklogRef = useRef<TerminalWriterBacklog>({
@@ -313,6 +316,7 @@ export const TerminalViewport = forwardRef<
     clearTimer(snapshotTimeoutRef);
     clearTimer(snapshotRetryRef);
     snapshotPurposeRef.current = null;
+    snapshotRequestIdRef.current = null;
     catchUpReleaseSeqRef.current = 0;
     catchUpReleaseRuntimeIdRef.current = null;
     residualCaptureEnabledRef.current = false;
@@ -374,11 +378,19 @@ export const TerminalViewport = forwardRef<
   );
 
   const scheduleSnapshotTimeout = useCallback(
-    (purpose: SnapshotPurpose) => {
+    (purpose: SnapshotPurpose, requestId: string, generation: number) => {
       clearTimer(snapshotTimeoutRef);
       snapshotTimeoutRef.current = window.setTimeout(() => {
         snapshotTimeoutRef.current = null;
+        if (
+          snapshotRequestIdRef.current !== requestId ||
+          snapshotRequestGenerationRef.current !== generation ||
+          targetGenerationRef.current !== generation
+        ) {
+          return;
+        }
         snapshotPurposeRef.current = null;
+        snapshotRequestIdRef.current = null;
         onError("Terminal snapshot timed out; retrying");
         if (purpose === "loading") {
           setPhase("loading");
@@ -409,7 +421,6 @@ export const TerminalViewport = forwardRef<
       const size = publishTerminalSize(terminal.cols, terminal.rows);
       sendResize(size.cols, size.rows);
       clearTimer(snapshotRetryRef);
-      snapshotPurposeRef.current = purpose;
       snapshotTargetSeqRef.current = minSeq ?? 0;
       residualCaptureEnabledRef.current = true;
       clearResidualOutput();
@@ -418,22 +429,27 @@ export const TerminalViewport = forwardRef<
         setOverlayKind("catching-up");
       }
 
-      const sent = onSnapshotRequest(
+      const requestId = onSnapshotRequest(
         activeSessionId,
         activeTerminalId,
         size.cols,
         size.rows,
         { mode: "full", minSeq },
       );
-      if (!sent) {
+      if (!requestId) {
         snapshotPurposeRef.current = null;
+        snapshotRequestIdRef.current = null;
         if (purpose === "catching-up") {
           setPhase("catching-up");
         }
         scheduleSnapshotRetry(purpose);
         return false;
       }
-      scheduleSnapshotTimeout(purpose);
+      const generation = targetGenerationRef.current;
+      snapshotPurposeRef.current = purpose;
+      snapshotRequestIdRef.current = requestId;
+      snapshotRequestGenerationRef.current = generation;
+      scheduleSnapshotTimeout(purpose, requestId, generation);
       return true;
     },
     [
@@ -469,6 +485,7 @@ export const TerminalViewport = forwardRef<
       onSnapshotApplied: (position) => {
         clearTimer(snapshotTimeoutRef);
         snapshotPurposeRef.current = null;
+        snapshotRequestIdRef.current = null;
         latestAppliedRef.current = position;
         progressCheckpointsRef.current = progressCheckpointsRef.current.filter(
           (checkpoint) =>
@@ -750,6 +767,8 @@ export const TerminalViewport = forwardRef<
       clearAllTimers();
       cancelTerminalWrites();
       clearResidualOutput();
+      snapshotPurposeRef.current = null;
+      snapshotRequestIdRef.current = null;
       resetScrollState();
       setPhase("idle");
       setOverlayKind(null);
@@ -815,6 +834,7 @@ export const TerminalViewport = forwardRef<
   }, [connectionState]);
 
   useEffect(() => {
+    targetGenerationRef.current += 1;
     lastResizeRef.current = null;
     latestAppliedRef.current = null;
     latestReceivedRef.current = null;
@@ -823,6 +843,8 @@ export const TerminalViewport = forwardRef<
     cancelTerminalWrites();
     clearAllTimers();
     clearResidualOutput();
+    snapshotPurposeRef.current = null;
+    snapshotRequestIdRef.current = null;
     resetScrollState();
 
     const terminal = terminalRef.current;
@@ -891,9 +913,16 @@ export const TerminalViewport = forwardRef<
       }
 
       if (event.type === "snapshot") {
+        if (
+          event.requestId !== snapshotRequestIdRef.current ||
+          snapshotRequestGenerationRef.current !== targetGenerationRef.current
+        ) {
+          return;
+        }
         clearTimer(snapshotTimeoutRef);
         const purpose = snapshotPurposeRef.current;
         snapshotPurposeRef.current = null;
+        snapshotRequestIdRef.current = null;
         const currentSize = clampTerminalSize(terminal.cols, terminal.rows);
         if (
           event.format !== "xterm-serialized-vt" ||

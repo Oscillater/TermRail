@@ -1021,10 +1021,11 @@ async function runConcurrentUpdateStartCheck() {
 }
 
 async function runBracketedPasteCheck() {
-  const paste = "\x1b[200~first line\rsecond 中文行\x1b[201~";
-  const expectedMarker = `PASTE_HEX:${Buffer.from(paste, "utf8").toString("hex")}`;
-  const command =
-    "node -e \"let b=Buffer.alloc(0);process.stdin.setRawMode(true);process.stdin.on('data',d=>{b=Buffer.concat([b,d]);if(b.includes(Buffer.from('\\x1b[201~'))){console.log('PASTE_HEX:'+b.toString('hex'));process.exit(0)}});console.log('paste-ready')\"";
+  const payload = "first line\rsecond 中文行";
+  const paste = `\x1b[200~${payload}\x1b[201~`;
+  const expectedMarker = `PASTE_HEX:${Buffer.from(payload, "utf8").toString("hex")}`;
+  const expectedBytes = Buffer.byteLength(payload, "utf8");
+  const command = `node -e \"let b=Buffer.alloc(0);process.stdin.setRawMode(true);process.stdin.on('data',d=>{b=Buffer.concat([b,d]);if(b.length>=${expectedBytes}){console.log('PASTE_HEX:'+b.toString('hex'));process.exit(0)}});console.log('paste-ready')\"`;
   const created = await createSmokeTerminal(sessionId, command);
   const terminalId = created.terminal.id;
 

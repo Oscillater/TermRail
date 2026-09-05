@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { RuntimeStatus, SessionConfig } from "../types";
 import {
+  collectTerminalAttention,
   outputQuietDelayMs,
+  sortSessionsByAttentionState,
   summarizeSessionAttention,
   terminalAttentionFromStatus,
+  terminalAttentionKey,
 } from "./activity";
 
 const now = Date.parse("2026-01-01T00:00:10.000Z");
@@ -61,7 +64,30 @@ describe("terminal attention", () => {
         readyAt,
         now,
       ),
-    ).toEqual({ state: "ready", unread: false, updatedAt: readyAt });
+    ).toEqual({ state: "running", unread: false, updatedAt: readyAt });
+  });
+
+  it("creates a new ready state only after newer output becomes quiet", () => {
+    const readAt = now - 5_000;
+    const nextOutputAt = now - 1_000;
+    const status = runtimeStatus({ lastOutputAt: iso(nextOutputAt) });
+
+    expect(terminalAttentionFromStatus(status, readAt, now)).toEqual({
+      state: "working",
+      unread: false,
+      updatedAt: nextOutputAt,
+    });
+    expect(
+      terminalAttentionFromStatus(
+        status,
+        readAt,
+        nextOutputAt + outputQuietDelayMs,
+      ),
+    ).toEqual({
+      state: "ready",
+      unread: true,
+      updatedAt: nextOutputAt,
+    });
   });
 
   it("marks a stopped terminal done until its final state is read", () => {
@@ -116,5 +142,96 @@ describe("terminal attention", () => {
       stoppedCount: 1,
       updatedAt: 30,
     });
+  });
+
+  it("keeps unread state separate for each terminal", () => {
+    const outputAt = now - outputQuietDelayMs;
+    const session: SessionConfig = {
+      id: "session-a",
+      name: "Session A",
+      cwd: ".",
+      prompts: [],
+      terminals: [
+        { id: "terminal-a", name: "A", command: "a" },
+        { id: "terminal-b", name: "B", command: "b" },
+      ],
+    };
+    const statusA = runtimeStatus({ lastOutputAt: iso(outputAt) });
+    const statusB = runtimeStatus({
+      terminalId: "terminal-b",
+      lastOutputAt: iso(outputAt),
+    });
+
+    expect(
+      collectTerminalAttention(
+        [session],
+        { "session-a": { "terminal-a": statusA, "terminal-b": statusB } },
+        { [terminalAttentionKey("session-a", "terminal-a")]: outputAt },
+        now,
+      )["session-a"],
+    ).toEqual({
+      "terminal-a": {
+        state: "running",
+        unread: false,
+        updatedAt: outputAt,
+      },
+      "terminal-b": {
+        state: "ready",
+        unread: true,
+        updatedAt: outputAt,
+      },
+    });
+  });
+});
+
+describe("session list ordering", () => {
+  const sessions: SessionConfig[] = ["a", "b", "c", "d", "e"].map((id) => ({
+    id,
+    name: id.toUpperCase(),
+    cwd: ".",
+    prompts: [],
+    terminals: [],
+  }));
+
+  it("moves ready sessions first and working sessions second", () => {
+    const emptySummary = {
+      terminalCount: 1,
+      unreadCount: 0,
+      unreadReadyCount: 0,
+      unreadDoneCount: 0,
+      readyCount: 0,
+      workingCount: 0,
+      runningCount: 1,
+      stoppedCount: 0,
+      updatedAt: 0,
+    };
+
+    expect(
+      sortSessionsByAttentionState(sessions, {
+        a: emptySummary,
+        b: { ...emptySummary, workingCount: 1, runningCount: 0 },
+        c: {
+          ...emptySummary,
+          unreadCount: 1,
+          unreadReadyCount: 1,
+          readyCount: 1,
+          runningCount: 0,
+        },
+        d: { ...emptySummary, workingCount: 1, runningCount: 0 },
+        e: {
+          ...emptySummary,
+          unreadCount: 1,
+          unreadReadyCount: 1,
+          readyCount: 1,
+          runningCount: 0,
+        },
+      }).map((session) => session.id),
+    ).toEqual(["c", "e", "b", "d", "a"]);
+  });
+
+  it("keeps configuration order when no session needs attention", () => {
+    expect(
+      sortSessionsByAttentionState(sessions, {}).map(({ id }) => id),
+    ).toEqual(["a", "b", "c", "d", "e"]);
   });
 });

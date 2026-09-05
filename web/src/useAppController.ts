@@ -687,7 +687,7 @@ export function useAppController() {
       cols: number,
       rows: number,
       options?: TerminalSnapshotRequestOptions,
-    ): boolean =>
+    ): string | null =>
       sessionStream.requestSnapshot(sessionId, terminalId, cols, rows, options),
     [sessionStream.requestSnapshot],
   );

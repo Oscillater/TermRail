@@ -6,6 +6,7 @@ import type {
 
 export type TerminalStreamSnapshotEvent = {
   type: "snapshot";
+  requestId: string;
   sessionId: string;
   terminalId: string;
   runtimeId: number | null;

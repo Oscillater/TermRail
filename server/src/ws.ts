@@ -322,8 +322,17 @@ export function attachWebSocketServer(
     terminalId: string,
   ): void {
     const key = subscriptionKey(sessionId, terminalId);
-    subscriptions.get(key)?.delete(ws);
-    clientSubscriptions.get(ws)?.delete(key);
+    const subscribers = subscriptions.get(key);
+    subscribers?.delete(ws);
+    if (subscribers?.size === 0) {
+      subscriptions.delete(key);
+    }
+
+    const clientKeys = clientSubscriptions.get(ws);
+    clientKeys?.delete(key);
+    if (clientKeys?.size === 0) {
+      clientSubscriptions.delete(ws);
+    }
     send(ws, { type: "unsubscribed", sessionId, terminalId });
   }
 
@@ -334,7 +343,11 @@ export function attachWebSocketServer(
     }
 
     clientKeys.forEach((key) => {
-      subscriptions.get(key)?.delete(ws);
+      const subscribers = subscriptions.get(key);
+      subscribers?.delete(ws);
+      if (subscribers?.size === 0) {
+        subscriptions.delete(key);
+      }
     });
     clientSubscriptions.delete(ws);
   }
@@ -410,6 +423,10 @@ export function attachWebSocketServer(
     const handleMessage = async (raw: WebSocket.RawData) => {
       try {
         const message = parseClientMessage(raw);
+        if (message.type === "unsubscribe") {
+          unsubscribe(ws, message.sessionId, message.terminalId);
+          return;
+        }
         ensureTerminal(message.sessionId, message.terminalId);
 
         switch (message.type) {
@@ -427,9 +444,6 @@ export function attachWebSocketServer(
               message.mode ?? "tail",
               message.minSeq,
             );
-            break;
-          case "unsubscribe":
-            unsubscribe(ws, message.sessionId, message.terminalId);
             break;
           case "input":
             sessionManager.write(

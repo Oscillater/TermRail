@@ -255,9 +255,18 @@ export function terminalAttentionFromStatus(
   }
 
   const ready = now - lastOutputAt >= outputQuietDelayMs;
+  if (!ready) {
+    return {
+      state: "working",
+      unread: false,
+      updatedAt: lastOutputAt,
+    };
+  }
+
+  const unread = lastOutputAt > readAt;
   return {
-    state: ready ? "ready" : "working",
-    unread: ready && lastOutputAt > readAt,
+    state: unread ? "ready" : "running",
+    unread,
     updatedAt: lastOutputAt,
   };
 }
@@ -354,6 +363,28 @@ export function collectSessionAttention(
       summarizeSessionAttention(session, terminalAttention[session.id]),
     ]),
   );
+}
+
+export function sortSessionsByAttentionState(
+  sessions: SessionConfig[],
+  sessionAttention: SessionAttentionById,
+): SessionConfig[] {
+  return sessions
+    .map((session, index) => ({
+      index,
+      session,
+      priority:
+        (sessionAttention[session.id]?.unreadReadyCount ?? 0) > 0
+          ? 0
+          : (sessionAttention[session.id]?.workingCount ?? 0) > 0
+            ? 1
+            : 2,
+    }))
+    .sort(
+      (left, right) =>
+        left.priority - right.priority || left.index - right.index,
+    )
+    .map(({ session }) => session);
 }
 
 export function statusLabel(status: RuntimeStatus | undefined): string {

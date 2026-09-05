@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
 const { EventEmitter } = require("node:events");
 const path = require("node:path");
+const { createInterface } = require("node:readline");
 const { PassThrough } = require("node:stream");
 
 class FakeHelperProcess extends EventEmitter {
@@ -139,6 +140,77 @@ async function testRealPowerShellHelperClassifiesErrors({
     assert.equal(isWindowsConsoleInputRetrySafe(unknownError), false);
   } finally {
     input.dispose();
+  }
+}
+
+async function testRealPowerShellHelperConvertsBracketedPaste() {
+  if (process.platform !== "win32") {
+    return;
+  }
+
+  const payload = "first line\rsecond \u4e2d\u6587\u884c";
+  const paste = `\x1b[200~${payload}\x1b[201~`;
+  const expectedHex = Buffer.from(payload, "utf8").toString("hex");
+  const child = createRealSelfTestHelper();
+  const lines = createInterface({ input: child.stdout });
+  const iterator = lines[Symbol.asyncIterator]();
+  const nextLine = async () => {
+    let timeout;
+    try {
+      const result = await Promise.race([
+        iterator.next(),
+        new Promise((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error("Timed out waiting for helper response")),
+            5000,
+          );
+        }),
+      ]);
+      if (result.done) {
+        throw new Error("Windows console input helper exited unexpectedly");
+      }
+      return result.value;
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  try {
+    assert.equal(await nextLine(), "READY");
+    const request = `__termrail_test_translate__${paste}`;
+    child.stdin.write(
+      `1\t0\t${Buffer.from(request, "utf8").toString("base64")}\n`,
+    );
+    const [kind, requestId, encodedRecords] = (await nextLine()).split("\t");
+    assert.equal(kind, "ACK");
+    assert.equal(requestId, "1");
+
+    const records = Buffer.from(encodedRecords, "base64")
+      .toString("utf8")
+      .split(",")
+      .map((record) => {
+        const [virtualKey, unicodeChar, controlKeyState] = record.split(":");
+        return {
+          virtualKey: Number.parseInt(virtualKey, 16),
+          unicodeChar: Number.parseInt(unicodeChar, 16),
+          controlKeyState: Number.parseInt(controlKeyState, 16),
+        };
+      });
+    const translated = String.fromCharCode(
+      ...records.map((record) => record.unicodeChar),
+    );
+    assert.equal(Buffer.from(translated, "utf8").toString("hex"), expectedHex);
+    assert.equal(
+      records.some((record) => record.unicodeChar === 0x1b),
+      false,
+    );
+    assert.equal(
+      records.filter((record) => record.unicodeChar === 0x0d).length,
+      1,
+    );
+  } finally {
+    lines.close();
+    child.kill();
   }
 }
 
@@ -297,6 +369,7 @@ async function main() {
     WindowsConsoleInput,
     WindowsConsoleInputError,
   });
+  await testRealPowerShellHelperConvertsBracketedPaste();
 
   console.log("Windows console input routing tests passed");
 }

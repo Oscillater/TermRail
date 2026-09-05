@@ -109,7 +109,7 @@ type TerminalPaneProps = {
     cols: number,
     rows: number,
     options?: TerminalSnapshotRequestOptions,
-  ) => boolean;
+  ) => string | null;
   onVisibleOutputApplied: (sessionId: string, terminalId: string) => void;
   onStartTerminal: (sessionId: string, terminalId: string) => void;
   onStopTerminal: (sessionId: string, terminalId: string) => void;

@@ -9,6 +9,7 @@ import {
   sessionAttentionDetail,
   sessionAttentionLabel,
   sessionAttentionSortValue,
+  sortSessionsByAttentionState,
   statusLabel,
 } from "../utils/activity";
 import { messageFromError } from "../utils/errors";
@@ -132,6 +133,10 @@ export function SessionPanel({
         sessionAttentionSortValue(right.attention) ||
       right.attention.updatedAt - left.attention.updatedAt ||
       left.index - right.index,
+  );
+  const orderedSessions = sortSessionsByAttentionState(
+    sessions,
+    sessionAttention,
   );
 
   const openCreateEditor = () => {
@@ -318,7 +323,7 @@ export function SessionPanel({
         {!loading && sessions.length === 0 ? (
           <p className="empty-state">No configured sessions.</p>
         ) : null}
-        {sessions.map((session) => {
+        {orderedSessions.map((session) => {
           const terminalId =
             activeTerminalIds[session.id] ?? session.terminals[0]?.id ?? null;
           const terminalStatus = terminalId

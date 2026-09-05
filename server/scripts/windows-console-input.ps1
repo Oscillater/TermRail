@@ -59,6 +59,9 @@ namespace TermRail
         private const string SelfTestEnv = "TERMRAIL_WINDOWS_INPUT_SELF_TEST";
         private const string SelfTestSafeInput = "__termrail_test_err_safe__";
         private const string SelfTestUnknownInput = "__termrail_test_err_unknown__";
+        private const string SelfTestTranslatePrefix = "__termrail_test_translate__";
+        private const string BracketedPasteStart = "\u001B[200~";
+        private const string BracketedPasteEnd = "\u001B[201~";
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct KeyEventRecord
@@ -193,6 +196,13 @@ namespace TermRail
                     "self-test unknown failure after WriteConsoleInputW"
                 );
             }
+            if (data.StartsWith(SelfTestTranslatePrefix, StringComparison.Ordinal))
+            {
+                return TranslationResponse(
+                    requestId,
+                    data.Substring(SelfTestTranslatePrefix.Length)
+                );
+            }
             return null;
         }
 
@@ -204,6 +214,31 @@ namespace TermRail
         {
             return kind + "\t" + requestId + "\t" +
                 Convert.ToBase64String(Encoding.UTF8.GetBytes(message));
+        }
+
+        private static string TranslationResponse(string requestId, string data)
+        {
+            List<InputRecord> records = Translate(data);
+            StringBuilder translated = new StringBuilder();
+            foreach (InputRecord record in records)
+            {
+                if (!record.KeyEvent.KeyDown)
+                {
+                    continue;
+                }
+                if (translated.Length > 0)
+                {
+                    translated.Append(',');
+                }
+                translated.Append(record.KeyEvent.VirtualKeyCode.ToString("X4"));
+                translated.Append(':');
+                translated.Append(((int)record.KeyEvent.UnicodeChar).ToString("X4"));
+                translated.Append(':');
+                translated.Append(record.KeyEvent.ControlKeyState.ToString("X8"));
+            }
+            return "ACK\t" + requestId + "\t" + Convert.ToBase64String(
+                Encoding.UTF8.GetBytes(translated.ToString())
+            );
         }
 
         private static void Inject(uint processId, string data)
@@ -294,6 +329,17 @@ namespace TermRail
 
         private static List<InputRecord> Translate(string data)
         {
+            if (
+                StartsWith(data, 0, BracketedPasteStart) &&
+                data.EndsWith(BracketedPasteEnd, StringComparison.Ordinal)
+            )
+            {
+                data = data.Substring(
+                    BracketedPasteStart.Length,
+                    data.Length - BracketedPasteStart.Length - BracketedPasteEnd.Length
+                );
+            }
+
             List<InputRecord> records = new List<InputRecord>();
             for (int index = 0; index < data.Length; index++)
             {
