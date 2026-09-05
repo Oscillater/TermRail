@@ -47,6 +47,13 @@ async function main() {
               terminals: [],
               prompts: [],
             },
+            {
+              id: "interactive-terminal",
+              name: "Interactive Terminal",
+              cwd: ".",
+              terminals: [{ id: "shell", name: "Shell", command: "" }],
+              prompts: [],
+            },
           ],
         },
         null,
@@ -70,6 +77,9 @@ async function main() {
       { id: "main", name: "Main", command: "legacy-empty-command" },
     ]);
     assert.deepEqual(sessions[3].terminals, []);
+    assert.deepEqual(sessions[4].terminals, [
+      { id: "shell", name: "Shell", command: "" },
+    ]);
 
     const created = await store.createSession({
       id: "new-empty",
@@ -78,6 +88,19 @@ async function main() {
       prompts: [],
     });
     assert.deepEqual(created.terminals, []);
+
+    const interactiveTerminal = await store.createTerminal("empty-session", {
+      name: "Interactive",
+      command: "",
+    });
+    assert.equal(interactiveTerminal.command, "");
+    await assert.rejects(
+      store.createTerminal("empty-session", {
+        name: "",
+        command: "",
+      }),
+      (error) => error?.code === "INVALID_TERMINAL",
+    );
 
     await assert.rejects(
       store.createSession({

@@ -11,8 +11,10 @@ function deferred() {
 }
 
 class FakePty {
-  constructor(pid, options) {
+  constructor(pid, file, args, options) {
     this.pid = pid;
+    this.file = file;
+    this.args = Array.isArray(args) ? [...args] : args;
     this.options = options;
     this.dataListeners = [];
     this.exitListeners = [];
@@ -60,8 +62,13 @@ function createPtyFactory() {
   const terminals = [];
   return {
     terminals,
-    spawn(_file, _args, options) {
-      const terminal = new FakePty(1000 + terminals.length, options);
+    spawn(file, args, options) {
+      const terminal = new FakePty(
+        1000 + terminals.length,
+        file,
+        args,
+        options,
+      );
       terminals.push(terminal);
       return terminal;
     },
@@ -210,6 +217,73 @@ async function testResizeDuringStartUsesLatestSize(SessionManager) {
 
   assert.equal(factory.terminals[0].options.cols, 88);
   assert.equal(factory.terminals[0].options.rows, 24);
+  factory.terminals[0].emitExit(0);
+}
+
+async function testEmptyCommandStartsInteractiveShell(SessionManager) {
+  const factory = createPtyFactory();
+  const manager = new SessionManager(process.cwd(), {
+    ptySpawn: factory.spawn,
+  });
+  const session = sessionConfig();
+  const terminalConfig = { ...session.terminals[0], command: "" };
+
+  await manager.start(session, terminalConfig);
+
+  assert.equal(
+    factory.terminals[0].file,
+    process.platform === "win32"
+      ? process.env.TERMRAIL_SHELL || "powershell.exe"
+      : process.env.SHELL || "/bin/sh",
+  );
+  assert.deepEqual(factory.terminals[0].args, []);
+
+  factory.terminals[0].emitExit(0);
+}
+
+async function testEmptyCommandInputUsesPty(SessionManager) {
+  const factory = createPtyFactory();
+  const windowsConsoleInput = createBlockingWindowsConsoleInput();
+  const manager = new SessionManager(process.cwd(), {
+    ptySpawn: factory.spawn,
+    windowsConsoleInput,
+  });
+  const session = sessionConfig();
+  const terminalConfig = { ...session.terminals[0], command: "" };
+
+  await manager.start(session, terminalConfig);
+  await manager.write(session.id, terminalConfig.id, "interactive input");
+
+  assert.deepEqual(windowsConsoleInput.writes, []);
+  assert.deepEqual(factory.terminals[0].writes, ["interactive input"]);
+
+  factory.terminals[0].emitExit(0);
+}
+
+async function testNonEmptyCommandUsesShellCommandMode(SessionManager) {
+  const factory = createPtyFactory();
+  const manager = new SessionManager(process.cwd(), {
+    ptySpawn: factory.spawn,
+  });
+  const session = sessionConfig();
+  const terminalConfig = { ...session.terminals[0], command: " test-command " };
+
+  await manager.start(session, terminalConfig);
+
+  assert.deepEqual(
+    factory.terminals[0].args,
+    process.platform === "win32"
+      ? [
+          "-NoLogo",
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          "test-command",
+        ]
+      : ["-lc", "test-command"],
+  );
+
   factory.terminals[0].emitExit(0);
 }
 
@@ -985,6 +1059,9 @@ async function main() {
 
   await testStaleRuntimeCallbacks(SessionManager);
   await testResizeDuringStartUsesLatestSize(SessionManager);
+  await testEmptyCommandStartsInteractiveShell(SessionManager);
+  await testEmptyCommandInputUsesPty(SessionManager);
+  await testNonEmptyCommandUsesShellCommandMode(SessionManager);
   await testExplicitStartSizeOverridesConcurrentResize(SessionManager);
   await testResizeAfterDeleteRecreateTargetsCurrentRuntime(SessionManager);
   await testConcurrentStartRejectsDuplicate(SessionManager);

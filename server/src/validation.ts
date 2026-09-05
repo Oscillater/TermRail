@@ -23,6 +23,10 @@ function cleanString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function cleanCommand(value: unknown): string | null {
+  return typeof value === "string" ? value.trim() : null;
+}
+
 function requireId(
   value: unknown,
   field: string,
@@ -112,21 +116,19 @@ function parseTerminals(
 
     const id = requireId(record.id, `${field}[${index}].id`, terminalErrors);
     const name = cleanString(record.name);
-    const command = cleanString(record.command);
+    const command = cleanCommand(record.command);
 
     if (!name) {
       terminalErrors.push(`${field}[${index}].name must be a non-empty string`);
     }
-    if (!command) {
-      terminalErrors.push(
-        `${field}[${index}].command must be a non-empty string`,
-      );
+    if (command === null) {
+      terminalErrors.push(`${field}[${index}].command must be a string`);
     }
     if (id && seen.has(id)) {
       terminalErrors.push(`${field}[${index}].id must be unique`);
     }
 
-    if (terminalErrors.length > 0 || !id || !name || !command) {
+    if (terminalErrors.length > 0 || !id || !name || command === null) {
       errors.push(...terminalErrors);
       return;
     }
@@ -165,16 +167,16 @@ export function terminalFromInput(
   }
 
   const name = cleanString(record.name);
-  const command = cleanString(record.command);
+  const command = cleanCommand(record.command);
 
   if (!name) {
     errors.push("name must be a non-empty string");
   }
-  if (!command) {
-    errors.push("command must be a non-empty string");
+  if (command === null) {
+    errors.push("command must be a string");
   }
 
-  if (errors.length > 0 || !id || !name || !command) {
+  if (errors.length > 0 || !id || !name || command === null) {
     throw new HttpError(
       400,
       "INVALID_TERMINAL",

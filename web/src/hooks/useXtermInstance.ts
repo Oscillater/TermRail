@@ -69,7 +69,7 @@ function createTerminal(): Terminal {
     convertEol: false,
     cursorBlink: true,
     fontFamily:
-      'ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace',
+      '"CaskaydiaMono Nerd Font Mono", "CaskaydiaMono Nerd Font", "CaskaydiaCove Nerd Font Mono", "CaskaydiaCove Nerd Font", "0xProto Nerd Font Mono", "0xProto Nerd Font", "Symbols Nerd Font Mono", "Symbols Nerd Font", ui-monospace, SFMono-Regular, "Cascadia Mono", "Cascadia Code", Consolas, "Liberation Mono", Menlo, monospace',
     fontSize: 13,
     lineHeight: 1.25,
     scrollback: 100000,

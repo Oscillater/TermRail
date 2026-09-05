@@ -142,25 +142,34 @@ async function waitForExit(
   return exited;
 }
 
-function shellForCommand(command: string): { file: string; args: string[] } {
+function shellForCommand(command: string): {
+  file: string;
+  args: string[];
+  interactive: boolean;
+} {
+  const trimmedCommand = command.trim();
   if (process.platform === "win32") {
     const file = process.env.TERMRAIL_SHELL || "powershell.exe";
     return {
       file,
-      args: [
-        "-NoLogo",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        command,
-      ],
+      args: trimmedCommand
+        ? [
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            trimmedCommand,
+          ]
+        : [],
+      interactive: !trimmedCommand,
     };
   }
 
   return {
     file: process.env.SHELL || "/bin/sh",
-    args: ["-lc", command],
+    args: trimmedCommand ? ["-lc", trimmedCommand] : [],
+    interactive: !trimmedCommand,
   };
 }
 
@@ -249,6 +258,7 @@ export class TerminalRuntimeController {
   private exitPromise: Promise<void> | null = null;
   private startPromise: Promise<RuntimeStatus> | null = null;
   private stopPromise: Promise<RuntimeStatus> | null = null;
+  private useWindowsConsoleInputForRuntime = true;
 
   constructor(private readonly options: TerminalRuntimeControllerOptions) {}
 
@@ -449,6 +459,7 @@ export class TerminalRuntimeController {
           sessionId: this.options.sessionId,
           terminalId: this.options.terminalId,
           isCurrent: () => this.isActiveRuntime(runtimeId, terminal),
+          useWindowsConsoleInput: this.useWindowsConsoleInputForRuntime,
         });
       })
       .catch((error: unknown) => {
@@ -515,7 +526,7 @@ export class TerminalRuntimeController {
     requestedSize?: Partial<TerminalSize>;
   }): Promise<RuntimeStatus> {
     const resolvedCwd = await this.resolveCwd(cwd);
-    const { file, args } = shellForCommand(command);
+    const { file, args, interactive } = shellForCommand(command);
     const startedAt = now();
     const terminalSize = normalizeTerminalSize(
       requestedSize ?? {
@@ -566,6 +577,7 @@ export class TerminalRuntimeController {
     this.inputQueue = Promise.resolve();
     this.exitPromise = exitPromise;
     this.stopPromise = null;
+    this.useWindowsConsoleInputForRuntime = !interactive;
 
     terminal.onData((data) => {
       if (!this.isActiveRuntime(runtimeId, terminal)) {

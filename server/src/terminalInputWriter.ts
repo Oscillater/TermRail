@@ -41,6 +41,7 @@ type TerminalInputWriteRequest = {
   sessionId: string;
   terminalId: string;
   isCurrent: () => boolean;
+  useWindowsConsoleInput?: boolean;
 };
 
 function traceWindowsConsoleInput(
@@ -67,9 +68,11 @@ export class TerminalInputWriter {
     sessionId,
     terminalId,
     isCurrent,
+    useWindowsConsoleInput = true,
   }: TerminalInputWriteRequest): Promise<TerminalInputWriteResult> {
     const windowsConsoleInput = this.options.windowsConsoleInput;
     if (
+      !useWindowsConsoleInput ||
       !windowsConsoleInput ||
       processId === null ||
       !shouldUseWindowsConsoleInput(data)

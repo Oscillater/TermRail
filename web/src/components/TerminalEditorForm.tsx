@@ -60,7 +60,6 @@ export function TerminalEditorForm({
           }
           placeholder="Command"
           ref={commandInputRef}
-          required
           value={draft.command}
         />
         <button

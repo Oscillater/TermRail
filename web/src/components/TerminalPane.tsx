@@ -408,12 +408,12 @@ export function TerminalPane({
       name: currentEditor.draft.name.trim(),
       command: currentEditor.draft.command.trim(),
     };
-    if (!nextTerminal.name || !nextTerminal.command) {
+    if (!nextTerminal.name) {
       updateEditor((current) => {
         if (current.mode !== "create" && current.mode !== "edit") {
           return current;
         }
-        return { ...current, error: "name and command are required" };
+        return { ...current, error: "name is required" };
       });
       focusTerminalCommandInputSoon(true);
       return;
