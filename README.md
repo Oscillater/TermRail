@@ -6,25 +6,34 @@
   <img src="web/public/assets/termrail-icon.png" alt="TermRail logo" width="160" />
 </p>
 
-Local browser dashboard for persistent terminal sessions.
+TermRail is a local multi-task terminal workspace for Coding Agent workflows.
 
-When working with coding agents across multiple projects, developers often need to keep several long-running shell commands alive at the same time: project shells, development servers, Codex, Claude Code, test commands, and supporting scripts. TermRail organizes those commands into saved, switchable sessions and lets you manage startup, interaction, and output from a local browser UI.
+If you often use Codex, Claude Code, dev servers, test commands, and scripts across multiple projects, you may end up switching between many PowerShell / Terminal windows. TermRail brings those long-running terminal tasks into one local browser dashboard, so you can save, start, switch, and monitor each task without constantly polling scattered windows.
 
-TermRail is built for trusted local developer workstations.
+> Built for developers who run multiple Coding Agents / terminal tasks at the same time and want to keep the workflow local.
+
+TermRail is designed for trusted local developer workstations. It starts local shells; access to TermRail is effectively access to your local terminal.
 
 ![TermRail screenshot](web/public/assets/termrail-screenshot.png)
 
-## Features
+## Why TermRail?
 
-- Start, stop, and switch between named terminal sessions.
-- Open multiple terminal tabs inside one session.
+- **Fewer windows**: manage multiple projects, agents, dev servers, and test commands in one place.
+- **Less context loss**: each Session keeps its own working directory and terminal tabs, making it easier to return to a task.
+- **Less repeated typing**: reuse common prompts with copy, insert, and send actions.
+- **Less manual polling**: background tasks show `Working`, `Quiet`, and `Stopped` states, so you know when to check back.
+- **Local-first**: configuration, commands, and terminal output stay on your machine for trusted personal development workflows.
+
+## Core Features
+
+- Create, start, stop, and switch between named terminal Sessions.
+- Open multiple terminal tabs inside each Session.
 - Run real interactive shells through xterm.js and node-pty.
-- Keep live output streaming over WebSocket.
-- See background activity with `Working`, `Quiet`, and `Stopped` indicators.
+- Stream live terminal output over WebSocket.
+- Keep browser scrollback and server-side terminal buffers during runtime.
 - Manage reusable prompts with copy, insert, and send actions.
 - Pick local working directories from the UI.
 - Collapse side panels to give the terminal more room.
-- Keep large terminal scrollback in the browser and server-side buffers during runtime.
 - Protect local HTTP and WebSocket access with an optional auth token.
 
 ## Requirements

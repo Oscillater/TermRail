@@ -6,25 +6,35 @@
   <img src="web/public/assets/termrail-icon.png" alt="TermRail logo" width="160" />
 </p>
 
-TermRail 是一个本地终端会话管理工具。它在浏览器里提供界面，后端通过 PTY 启动真实的 shell。
+TermRail 是一个面向 Coding Agent 工作流的本地多任务终端工作台。
 
-在使用 Coding Agent 并行推进多个项目时，开发者通常需要为不同项目维持多条长期运行的 shell 命令，例如项目 shell、开发服务器、Codex、Claude Code 或测试命令。TermRail 将这些命令组织为可保存、可切换的会话，并在本地浏览器中统一管理它们的启动、交互和输出查看。
+如果你经常同时使用 Codex、Claude Code、开发服务器、测试命令和各种脚本推进多个项目，你可能会在一堆 PowerShell / Terminal 窗口之间来回切换。TermRail 把这些分散在不同项目目录里的长期终端任务集中到一个本地浏览器看板中，让你可以保存、启动、切换和持续观察每个任务，而不必反复轮询多个窗口。
 
-当前版本主要面向本地开发环境使用。
+> 适合：同时使用多个 Coding Agent / 终端任务推进项目，并希望把工作流留在本地的开发者。
+
+当前版本主要面向可信本地开发环境。TermRail 会启动本地 shell；能访问 TermRail，基本就等于能操作你的本地终端。
 
 ![TermRail 截图](web/public/assets/termrail-screenshot.png)
 
-## 功能
+## 为什么需要 TermRail？
 
-- 管理多个终端会话（项目）。
-- 每个会话可以有多个终端标签页。
-- 支持交互式终端输入和输出。
-- 切换会话后，当前运行期间的终端输出会保留。
-- 后台会话有新输出时，会显示 `Working`、`Quiet` 或 `Stopped` 状态。
-- 内置 prompt library，支持复制、插入到终端、直接发送。
-- 可以从界面里选择本地工作目录。
-- 左右侧栏可以收起。
-- 可以通过 auth token 保护本地 HTTP API 和 WebSocket。
+- **少开窗口**：把多个项目、Agent、开发服务器和测试命令集中到一个界面里。
+- **少丢上下文**：每个 Session 绑定自己的工作目录和终端标签页，切换任务时更容易回到现场。
+- **少重复输入**：内置 Prompt Library，常用提示词可以复制、插入或直接发送。
+- **少靠记忆轮询**：后台任务会显示 `Working`、`Quiet`、`Stopped` 等状态，方便及时回到需要关注的 Agent。
+- **本地优先**：配置、命令和终端输出都在本机运行，适合可信的个人开发环境。
+
+## 核心功能
+
+- 创建、启动、停止和切换多个命名终端 Session。
+- 每个 Session 可包含多个终端标签页。
+- 通过 xterm.js 和 node-pty 运行真实交互式 shell。
+- 通过 WebSocket 实时流式输出终端内容。
+- 在当前运行期间保留浏览器端滚动缓冲和服务端终端缓冲。
+- 管理可复用 Prompt，支持复制、插入到终端和直接发送。
+- 从界面选择本地工作目录。
+- 折叠左右侧栏，为终端留出更多空间。
+- 可通过 auth token 保护本地 HTTP API 和 WebSocket。
 
 ## 环境要求
 

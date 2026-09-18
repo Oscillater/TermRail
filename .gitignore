@@ -3,5 +3,6 @@ dist/
 .env
 .env.*
 data/config.json
+data/config.demo.json
 TODO.md
 *.log
