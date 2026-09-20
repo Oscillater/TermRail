@@ -1,20 +1,40 @@
-# TermRail
+<div align="center">
+  <img src="web/public/assets/termrail-icon.png" alt="TermRail logo" width="140" />
 
-[English](README.md)
+  <h1>TermRail</h1>
+
+  <p>
+    <strong>面向 Coding Agent 工作流的本地多任务终端工作台。</strong>
+  </p>
+
+  <p>
+    在一个本地浏览器看板中管理 Codex、Claude Code、开发服务器、测试命令和长期运行的终端任务。
+  </p>
+
+  <p>
+    <a href="README.md">English</a>
+    ·
+    <a href="https://github.com/Oscillater/TermRail/releases/tag/v0.1.0">v0.1.0 Release</a>
+    ·
+    <a href="https://www.bilibili.com/video/BV1hheq6jEeM/">演示视频</a>
+    ·
+    <a href="https://oscillater.github.io/collections/termrail">开发手记（更新中）</a>
+  </p>
+
+  <p>
+    <img alt="Version" src="https://img.shields.io/github/v/tag/Oscillater/TermRail?style=flat-square&label=version" />
+    <img alt="License" src="https://img.shields.io/github/license/Oscillater/TermRail?style=flat-square" />
+    <img alt="Node.js" src="https://img.shields.io/badge/Node.js-18%2B-339933?style=flat-square&logo=node.js&logoColor=white" />
+    <img alt="Stack" src="https://img.shields.io/badge/stack-React%20%2B%20xterm.js%20%2B%20node--pty-blue?style=flat-square" />
+    <img alt="Local first" src="https://img.shields.io/badge/local--first-terminal%20workspace-7c3aed?style=flat-square" />
+  </p>
+</div>
 
 <p align="center">
-  <img src="web/public/assets/termrail-icon.png" alt="TermRail logo" width="160" />
+  <img src="web/public/assets/termrail-screenshot.png" alt="TermRail screenshot" />
 </p>
 
-TermRail 是一个面向 Coding Agent 工作流的本地多任务终端工作台。
-
-如果你经常同时使用 Codex、Claude Code、开发服务器、测试命令和各种脚本推进多个项目，你可能会在一堆 PowerShell / Terminal 窗口之间来回切换。TermRail 把这些分散在不同项目目录里的长期终端任务集中到一个本地浏览器看板中，让你可以保存、启动、切换和持续观察每个任务，而不必反复轮询多个窗口。
-
-> 适合：同时使用多个 Coding Agent / 终端任务推进项目，并希望把工作流留在本地的开发者。
-
-当前版本主要面向可信本地开发环境。TermRail 会启动本地 shell；能访问 TermRail，基本就等于能操作你的本地终端。
-
-![TermRail 截图](web/public/assets/termrail-screenshot.png)
+> TermRail 面向可信本地开发环境。它会启动本地 shell；能访问 TermRail，基本就等于能操作你的本地终端。
 
 ## 为什么需要 TermRail？
 

@@ -1,20 +1,40 @@
-# TermRail
+<div align="center">
+  <img src="web/public/assets/termrail-icon.png" alt="TermRail logo" width="140" />
 
-[简体中文](README.zh-CN.md)
+  <h1>TermRail</h1>
+
+  <p>
+    <strong>A local multi-task terminal workspace for Coding Agent workflows.</strong>
+  </p>
+
+  <p>
+    Manage Codex, Claude Code, dev servers, tests, and long-running shell tasks from one local browser dashboard.
+  </p>
+
+  <p>
+    <a href="README.zh-CN.md">简体中文</a>
+    ·
+    <a href="https://github.com/Oscillater/TermRail/releases/tag/v0.1.0">v0.1.0 Release</a>
+    ·
+    <a href="https://www.bilibili.com/video/BV1hheq6jEeM/">Demo Video</a>
+    ·
+    <a href="https://oscillater.github.io/collections/termrail">Blog Series (ongoing)</a>
+  </p>
+
+  <p>
+    <img alt="Version" src="https://img.shields.io/github/v/tag/Oscillater/TermRail?style=flat-square&label=version" />
+    <img alt="License" src="https://img.shields.io/github/license/Oscillater/TermRail?style=flat-square" />
+    <img alt="Node.js" src="https://img.shields.io/badge/Node.js-18%2B-339933?style=flat-square&logo=node.js&logoColor=white" />
+    <img alt="Stack" src="https://img.shields.io/badge/stack-React%20%2B%20xterm.js%20%2B%20node--pty-blue?style=flat-square" />
+    <img alt="Local first" src="https://img.shields.io/badge/local--first-terminal%20workspace-7c3aed?style=flat-square" />
+  </p>
+</div>
 
 <p align="center">
-  <img src="web/public/assets/termrail-icon.png" alt="TermRail logo" width="160" />
+  <img src="web/public/assets/termrail-screenshot.png" alt="TermRail screenshot" />
 </p>
 
-TermRail is a local multi-task terminal workspace for Coding Agent workflows.
-
-If you often use Codex, Claude Code, dev servers, test commands, and scripts across multiple projects, you may end up switching between many PowerShell / Terminal windows. TermRail brings those long-running terminal tasks into one local browser dashboard, so you can save, start, switch, and monitor each task without constantly polling scattered windows.
-
-> Built for developers who run multiple Coding Agents / terminal tasks at the same time and want to keep the workflow local.
-
-TermRail is designed for trusted local developer workstations. It starts local shells; access to TermRail is effectively access to your local terminal.
-
-![TermRail screenshot](web/public/assets/termrail-screenshot.png)
+> TermRail is designed for trusted local developer workstations. It starts local shells; access to TermRail is effectively access to your local terminal.
 
 ## Why TermRail?
 
