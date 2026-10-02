@@ -18,24 +18,45 @@ function Require-Command {
 }
 
 function Wait-And-Open {
-  param(
-    [Parameter(Mandatory = $true)]
-    [string] $Url
-  )
+  # Vite owns 5173 by default, but silently moves to 5174, 5175, ... when that
+  # port is taken by another project. Probe the range and open the page that
+  # actually serves TermRail instead of assuming the default port.
+  $ports = 5173..5183
 
   for ($attempt = 0; $attempt -lt 60; $attempt += 1) {
-    try {
-      $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 2
-      if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
-        Start-Process $Url
+    foreach ($port in $ports) {
+      $url = "http://127.0.0.1:$port"
+      $html = $null
+
+      try {
+        $request = [System.Net.WebRequest]::Create($url)
+        $request.Proxy = $null
+        $request.Timeout = 1500
+        $response = $request.GetResponse()
+        try {
+          $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+          try {
+            $html = $reader.ReadToEnd()
+          } finally {
+            $reader.Dispose()
+          }
+        } finally {
+          $response.Close()
+        }
+      } catch {
+        $html = $null
+      }
+
+      if ($null -ne $html -and $html.Contains("<title>TermRail")) {
+        Start-Process $url
         return
       }
-    } catch {
-      Start-Sleep -Seconds 1
     }
+
+    Start-Sleep -Seconds 1
   }
 
-  Write-Warning "TermRail started, but $Url did not respond within 60 seconds."
+  Write-Warning "TermRail UI did not answer on ports 5173-5183 within 60 seconds."
 }
 
 try {
@@ -60,11 +81,11 @@ try {
     $env:VITE_AUTH_TOKEN = $env:AUTH_TOKEN
   }
 
-  $url = "http://127.0.0.1:5173"
-  Start-Job -ScriptBlock ${function:Wait-And-Open} -ArgumentList $url | Out-Null
+  Start-Job -ScriptBlock ${function:Wait-And-Open} | Out-Null
 
   Write-Host "[TermRail] Starting backend and UI..."
-  Write-Host "[TermRail] UI: $url"
+  Write-Host "[TermRail] UI: opens automatically (default http://127.0.0.1:5173)."
+  Write-Host "[TermRail] If that port is busy, Vite moves to 5174+ and the script follows it."
   & npm start
   exit $LASTEXITCODE
 } catch {

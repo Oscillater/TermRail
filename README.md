@@ -83,12 +83,18 @@ npm start
 
 Development services:
 
-| Service                   | URL                     |
-| ------------------------- | ----------------------- |
-| UI                        | `http://127.0.0.1:5173` |
-| Backend API and WebSocket | `http://127.0.0.1:8787` |
+| Service                   | URL                               |
+| ------------------------- | --------------------------------- |
+| UI                        | `http://127.0.0.1:5173` (default) |
+| Backend API and WebSocket | `http://127.0.0.1:8787`           |
 
 Vite proxies `/api` and `/ws` to the backend during development.
+
+Vite keeps `5173` and moves to `5174`, `5175`, ... when another project already
+owns that port. Use the `Local:` address Vite prints at startup;
+`start.ps1` probes the range and opens the correct page for you. A tab opened on
+a stale address stops receiving hot updates, so reload it against the address
+Vite reports.
 
 ## Sessions
 
