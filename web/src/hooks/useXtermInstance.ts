@@ -10,6 +10,7 @@ import { CanvasAddon } from "@xterm/addon-canvas";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { focusTerminalPreventScroll } from "../utils/terminal";
+import { isScrollToBottomShortcut } from "../utils/shortcuts";
 
 type TerminalSlotName = "a" | "b";
 
@@ -37,6 +38,7 @@ type UseXtermInstanceOptions = {
   onReady: (terminal: Terminal) => void;
   onResize: (terminal: Terminal, cols: number, rows: number) => void;
   onScroll: (terminal: Terminal) => void;
+  onScrollToBottomShortcut: (terminal: Terminal) => void;
 };
 
 function canFitTerminal(container: HTMLElement | null): boolean {
@@ -226,6 +228,13 @@ export function useXtermInstance(
         }
         if (event.type !== "keydown" || !event.ctrlKey || event.altKey) {
           return true;
+        }
+
+        if (isScrollToBottomShortcut(event)) {
+          event.preventDefault();
+          event.stopPropagation();
+          callbacksRef.current.onScrollToBottomShortcut(terminal);
+          return false;
         }
 
         const key = event.key.toLowerCase();

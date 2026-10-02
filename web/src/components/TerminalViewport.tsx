@@ -37,6 +37,7 @@ import {
   clampTerminalSize,
   focusTerminalPreventScroll,
   readTerminalScrollState,
+  snapTerminalViewportToBottom,
 } from "../utils/terminal";
 
 export type TerminalViewportHandle = {
@@ -193,6 +194,7 @@ export const TerminalViewport = forwardRef<
     handleScrollPointerUp,
     resetScrollState,
     scrollState,
+    scrollTerminalToBottom,
     scrollTrackRef,
     updateTerminalScrollState,
   } = useTerminalScroll(terminalRef);
@@ -740,7 +742,7 @@ export const TerminalViewport = forwardRef<
         return;
       }
       if (target.wasAtBottom) {
-        terminal.scrollToBottom();
+        snapTerminalViewportToBottom(terminal);
       } else {
         const current = readTerminalScrollState(terminal);
         terminal.scrollToLine(
@@ -791,6 +793,7 @@ export const TerminalViewport = forwardRef<
         evaluateCatchUp();
       }
     },
+    onScrollToBottomShortcut: (terminal) => scrollTerminalToBottom(terminal),
   });
 
   useEffect(() => {
@@ -1115,7 +1118,7 @@ export const TerminalViewport = forwardRef<
           ref={scrollTrackRef}
           role="scrollbar"
           tabIndex={hasScrollback ? 0 : -1}
-          title="Drag to scroll terminal history"
+          title="Drag to scroll terminal history, or press Ctrl+End to jump to the bottom"
         >
           <span
             className="terminal-scroll-thumb"

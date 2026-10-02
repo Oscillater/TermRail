@@ -39,6 +39,18 @@ export function readTerminalScrollState(
   };
 }
 
+export function snapTerminalViewportToBottom(terminal: Terminal): void {
+  terminal.scrollToBottom();
+  // scrollToBottom() is a no-op once the buffer reports the bottom, so the
+  // viewport element can stay stuck at a stale offset after a snapshot replay
+  // or reconnect. Push the element down directly; xterm's own scroll handler
+  // reconciles the buffer, which is already at the bottom.
+  const viewport = terminal.element?.querySelector(".xterm-viewport");
+  if (viewport instanceof HTMLElement) {
+    viewport.scrollTop = viewport.scrollHeight;
+  }
+}
+
 export function focusTerminalPreventScroll(terminal: Terminal): boolean {
   const textarea = terminal.textarea;
   if (textarea) {

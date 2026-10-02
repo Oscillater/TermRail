@@ -51,6 +51,7 @@
 - Run real interactive shells through xterm.js and node-pty.
 - Stream live terminal output over WebSocket.
 - Keep browser scrollback and server-side terminal buffers during runtime.
+- Press `Ctrl+End` to jump the active terminal to the bottom of its scrollback, whether focus is on the terminal or elsewhere on the page. Text fields keep their own `Ctrl+End` behavior.
 - Manage reusable prompts with copy, insert, and send actions.
 - Pick local working directories from the UI.
 - Collapse side panels to give the terminal more room.

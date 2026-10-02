@@ -3,12 +3,32 @@ import {
   type PointerEvent as ReactPointerEvent,
   type RefObject,
   useCallback,
+  useEffect,
   useRef,
   useState,
 } from "react";
 import { Terminal } from "@xterm/xterm";
 import type { TerminalScrollState } from "../types";
-import { clampValue, readTerminalScrollState } from "../utils/terminal";
+import {
+  clampValue,
+  readTerminalScrollState,
+  snapTerminalViewportToBottom,
+} from "../utils/terminal";
+import { isScrollToBottomShortcut } from "../utils/shortcuts";
+
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+
+  const tagName = target.tagName.toLowerCase();
+  return Boolean(
+    tagName === "input" ||
+    tagName === "textarea" ||
+    tagName === "select" ||
+    (target instanceof HTMLElement && target.isContentEditable),
+  );
+}
 
 export function useTerminalScroll(terminalRef: RefObject<Terminal | null>) {
   const scrollTrackRef = useRef<HTMLDivElement | null>(null);
@@ -33,6 +53,18 @@ export function useTerminalScroll(terminalRef: RefObject<Terminal | null>) {
   const resetScrollState = useCallback(() => {
     setScrollState({ viewportY: 0, baseY: 0 });
   }, []);
+
+  const scrollTerminalToBottom = useCallback(
+    (terminal = terminalRef.current) => {
+      if (!terminal) {
+        return;
+      }
+
+      snapTerminalViewportToBottom(terminal);
+      updateTerminalScrollState(terminal);
+    },
+    [terminalRef, updateTerminalScrollState],
+  );
 
   const scrollTerminalToClientY = useCallback(
     (clientY: number) => {
@@ -155,6 +187,20 @@ export function useTerminalScroll(terminalRef: RefObject<Terminal | null>) {
     ],
   );
 
+  useEffect(() => {
+    const handleGlobalKeyDown = (event: KeyboardEvent) => {
+      if (!isScrollToBottomShortcut(event) || isTextEntryTarget(event.target)) {
+        return;
+      }
+
+      event.preventDefault();
+      scrollTerminalToBottom();
+    };
+
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, [scrollTerminalToBottom]);
+
   return {
     handleScrollKeyDown,
     handleScrollPointerDown,
@@ -162,6 +208,7 @@ export function useTerminalScroll(terminalRef: RefObject<Terminal | null>) {
     handleScrollPointerUp,
     resetScrollState,
     scrollState,
+    scrollTerminalToBottom,
     scrollTrackRef,
     updateTerminalScrollState,
   };
