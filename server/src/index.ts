@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +25,12 @@ const configPath = process.env.CONFIG_PATH
   ? resolve(process.env.CONFIG_PATH)
   : resolve(projectRoot, "data", "config.json");
 
+// Production bundles serve the built UI straight from the API server.
+// Development keeps using the Vite server, which proxies /api and /ws here.
+const staticDir = process.env.TERMRAIL_STATIC_DIR
+  ? resolve(process.env.TERMRAIL_STATIC_DIR)
+  : resolve(projectRoot, "web", "dist");
+
 const host = process.env.HOST || "127.0.0.1";
 const port = Number.parseInt(process.env.PORT || "8787", 10);
 const authToken = process.env.AUTH_TOKEN?.trim() ?? "";
@@ -47,6 +55,21 @@ function validatePort(value: number): void {
 
 function isLocalHost(value: string): boolean {
   return value === "127.0.0.1" || value === "localhost" || value === "::1";
+}
+
+function openUiInBrowser(url: string): void {
+  if (process.platform !== "win32") {
+    console.log(`[server] TermRail UI: ${url}`);
+    return;
+  }
+
+  // `start ""` treats the empty token as the window title so the URL is the
+  // thing being opened. Detached so the browser outlives a server restart.
+  const child = spawn("cmd.exe", ["/c", "start", "", url], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
 }
 
 function optionalStartSize(value: unknown): TerminalSize | undefined {
@@ -373,6 +396,14 @@ async function main(): Promise<void> {
     response.json(runtimePayload(configStore.listSessions()));
   });
 
+  if (existsSync(staticDir)) {
+    app.use(express.static(staticDir, { dotfiles: "ignore" }));
+  } else {
+    console.log(
+      `[server] no static UI at ${staticDir}; run "npm run build" or open the Vite dev server`,
+    );
+  }
+
   app.use(
     (
       error: unknown,
@@ -417,6 +448,10 @@ async function main(): Promise<void> {
       console.warn(
         "[server] warning: server is not bound to localhost; do not expose it directly to the public internet",
       );
+    }
+    if (process.env.TERMRAIL_OPEN === "1") {
+      const uiHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+      openUiInBrowser(`http://${uiHost}:${port}`);
     }
   });
 

@@ -8,4 +8,5 @@ TODO.md
 *.log
 test-results/
 playwright-report/
+release/
 .zcode/
