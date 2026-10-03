@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+const backendTarget = `http://127.0.0.1:${process.env.TERMRAIL_BACKEND_PORT ?? "8787"}`;
+
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -9,9 +11,9 @@ export default defineConfig({
     // start.ps1 probes the range and opens whichever port actually serves TermRail.
     port: 5173,
     proxy: {
-      "/api": "http://127.0.0.1:8787",
+      "/api": backendTarget,
       "/ws": {
-        target: "http://127.0.0.1:8787",
+        target: backendTarget,
         ws: true,
       },
     },

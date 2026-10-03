@@ -6,3 +6,6 @@ data/config.json
 data/config.demo.json
 TODO.md
 *.log
+test-results/
+playwright-report/
+.zcode/

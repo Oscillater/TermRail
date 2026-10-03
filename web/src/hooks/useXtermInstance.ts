@@ -216,7 +216,11 @@ export function useXtermInstance(
       terminal.loadAddon(fitAddon);
       terminal.open(container);
       try {
-        terminal.loadAddon(new CanvasAddon());
+        // E2E runs pass ?domrenderer=1 to skip the canvas renderer so tests can
+        // assert on-screen text through the DOM rows.
+        if (!new URLSearchParams(window.location.search).has("domrenderer")) {
+          terminal.loadAddon(new CanvasAddon());
+        }
       } catch {
         // Fall back to the default DOM renderer if canvas is unavailable.
       }
